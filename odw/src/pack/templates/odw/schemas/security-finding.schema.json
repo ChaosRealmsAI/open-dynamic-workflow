@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Open Dynamic Workflow Security Finding Result",
+  "type": "object",
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "severity", "claim", "evidence", "fix_hint"],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "severity": { "enum": ["critical", "high", "medium", "low"] },
+          "claim": { "type": "string" },
+          "evidence": { "type": "string" },
+          "fix_hint": { "type": "string" }
+        }
+      }
+    },
+    "clean_files": { "type": "array", "items": { "type": "string" } },
+    "uncertain": { "type": "array", "items": { "type": "string" } }
+  }
+}

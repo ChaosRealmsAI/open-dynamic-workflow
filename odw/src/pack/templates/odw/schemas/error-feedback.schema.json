@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Open Dynamic Workflow Error Feedback",
+  "type": "object",
+  "required": ["ok", "origin", "error", "feedback"],
+  "properties": {
+    "ok": { "const": false },
+    "origin": {
+      "type": "object",
+      "required": ["phase", "agent"],
+      "properties": {
+        "phase": { "type": "string" },
+        "agent": { "type": "string" },
+        "backend": { "type": "string" },
+        "attempt": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["category", "message"],
+      "properties": {
+        "category": {
+          "enum": [
+            "codexctl_not_found",
+            "codexctl_auth",
+            "codexctl_rate_limit",
+            "codexctl_network",
+            "codexctl_permission",
+            "codexctl_model",
+            "codexctl_input",
+            "codexctl_failed",
+            "workflow_agent_failed",
+            "schema_mismatch",
+            "verification_failed",
+            "unknown"
+          ]
+        },
+        "message": { "type": "string" },
+        "command": { "type": "string" },
+        "exit_code": { "type": ["integer", "null"] },
+        "stdout_tail": { "type": "string" },
+        "stderr_tail": { "type": "string" }
+      }
+    },
+    "feedback": {
+      "type": "object",
+      "required": ["retryable", "user_message", "next_action"],
+      "properties": {
+        "retryable": { "type": "boolean" },
+        "user_message": { "type": "string" },
+        "next_action": { "type": "string" },
+        "retry_prompt": { "type": "string" },
+        "required_change": { "type": "string" }
+      }
+    }
+  }
+}

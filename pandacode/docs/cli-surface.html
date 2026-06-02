@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PandaCode CLI Surface</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7f9;
+      --panel: #ffffff;
+      --ink: #17202a;
+      --muted: #647083;
+      --line: #d9e0e8;
+      --accent: #2364aa;
+      --ok: #1d7a4d;
+      --warn: #9a5b00;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    .wrap {
+      width: min(1120px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 28px 0 48px;
+    }
+
+    header {
+      margin-bottom: 22px;
+    }
+
+    h1, h2, p { margin: 0; }
+
+    h1 {
+      font-size: 30px;
+      line-height: 1.15;
+    }
+
+    h2 {
+      margin-bottom: 10px;
+      font-size: 18px;
+    }
+
+    p {
+      color: var(--muted);
+      max-width: 860px;
+    }
+
+    section {
+      margin-top: 20px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .card,
+    .table {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+
+    .card {
+      padding: 14px;
+    }
+
+    .card h2 {
+      margin-bottom: 6px;
+    }
+
+    code {
+      border-radius: 5px;
+      background: #eef2f6;
+      color: #111827;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 0.9em;
+      padding: 2px 5px;
+    }
+
+    pre {
+      margin: 0;
+      overflow-x: auto;
+      border-radius: 8px;
+      background: #111827;
+      color: #eef2f6;
+      padding: 12px;
+    }
+
+    pre code {
+      background: transparent;
+      color: inherit;
+      padding: 0;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+      font-size: 14px;
+    }
+
+    th {
+      background: #eef2f6;
+      font-weight: 750;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .tag {
+      display: inline-block;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .tag.ok {
+      border-color: rgba(29, 122, 77, 0.3);
+      color: var(--ok);
+    }
+
+    .tag.warn {
+      border-color: rgba(154, 91, 0, 0.3);
+      color: var(--warn);
+    }
+
+    @media (max-width: 760px) {
+      .grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <header>
+      <h1>PandaCode CLI Surface</h1>
+      <p>PandaCode v1 is a narrow coding-task executor for three runtimes: Codex through <code>codexctl session</code>, Claude Code through real <code>tmux</code>, and Bamboo as an embedded provider-native coding loop for domestic OpenAI-compatible models.</p>
+    </header>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Codex Runtime <span class="tag ok">implemented</span></h2>
+        <p>Uses <code>codexctl session start/send/answer/execute/read/interrupt/stop/list</code>. <code>exec</code> and <code>resume</code> call <code>execute</code> so PandaCode behaves as an executor, not only a planner. Structured questions flow through <code>answer</code>. Defaults to <code>gpt-5.5</code>, <code>xhigh</code> effort, and <code>max</code> permission.</p>
+      </article>
+      <article class="card">
+        <h2>Claude Runtime <span class="tag ok">implemented</span></h2>
+        <p>Starts Claude Code inside tmux with isolated local settings, inline PandaCode-owned hook settings, and an empty strict MCP config. Defaults to <code>opus</code>, <code>max</code> effort, and <code>max</code> permission. It pastes tasks into the TUI, waits for an explicit completion marker, records hook events, and reads visible/log output from tmux. The banned <code>claude -p</code> stream-json path is not used.</p>
+      </article>
+      <article class="card">
+        <h2>Bamboo Runtime <span class="tag ok">implemented</span></h2>
+        <p>Runs in-process. PandaCode calls the selected provider directly, gives the model read/search/edit/write/bash tools, writes JSONL events and reports under <code>.pandacode/bamboo/runs</code>, and supports compact-aware resume from the previous run id. Defaults to <code>deepseek</code> with high reasoning effort.</p>
+      </article>
+    </section>
+
+    <section>
+      <h2>Primary Commands</h2>
+      <pre><code>pandacode doctor --json --cd .
+pandacode models --json --cd .
+pandacode run --runtime auto --model &lt;model&gt; --effort &lt;effort&gt; --permission max --task-file task.md --json --cd .
+pandacode run --runtime auto --model kimi-k2.6 --effort high --task-file task.md --json --cd .
+pandacode codex exec --task-file task.md --cd .
+pandacode codex resume --session latest --task "continue" --cd .
+pandacode claude exec --task-file task.md --cd .
+pandacode bamboo exec --provider deepseek --model deepseek-v4-pro --effort high --task-file task.md --cd .
+pandacode &lt;runtime&gt; answer --session latest --choice 2 --wait --cd .
+pandacode claude resume --session latest --task "continue" --cd .</code></pre>
+    </section>
+
+    <section>
+      <h2>Runtime Commands</h2>
+      <div class="table">
+        <table>
+          <thead>
+            <tr>
+              <th>Command</th>
+              <th>Purpose</th>
+              <th>Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>exec</code></td>
+              <td>Start a coding task and wait for completion.</td>
+              <td>Accepts <code>--task</code>, <code>--task-file</code>, or stdin <code>-</code>.</td>
+            </tr>
+            <tr>
+              <td><code>resume</code></td>
+              <td>Continue an existing session with another task.</td>
+              <td>Claude restarts through official <code>claude --resume &lt;session-id&gt;</code> when tmux is gone.</td>
+            </tr>
+            <tr>
+              <td><code>answer</code></td>
+              <td>Answer a runtime prompt waiting for user input.</td>
+              <td>Claude maps to visible AskUserQuestion options; Codex maps <code>--choice N</code> to <code>codexctl session answer --pick N</code>.</td>
+            </tr>
+            <tr>
+              <td><code>status</code></td>
+              <td>Read current runtime status.</td>
+              <td>Codex reads app-server run state; Claude reads tmux state plus pending hook input; Bamboo reads local run reports.</td>
+            </tr>
+            <tr>
+              <td><code>logs</code></td>
+              <td>Read runtime output.</td>
+              <td>Use <code>--json</code> for full machine-readable runtime output.</td>
+            </tr>
+            <tr>
+              <td><code>artifacts</code></td>
+              <td>Show local session metadata and artifact paths.</td>
+              <td>State lives under <code>.pandacode/</code> in the target workspace.</td>
+            </tr>
+            <tr>
+              <td><code>model</code></td>
+              <td>Record model and effort for the next turn.</td>
+              <td><code>--model</code> and optional <code>--effort</code>.</td>
+            </tr>
+            <tr>
+              <td><code>models</code></td>
+              <td>List model choices for a runtime.</td>
+              <td>Codex delegates to <code>codexctl models</code>; Bamboo returns its built-in domestic model catalog.</td>
+            </tr>
+            <tr>
+              <td><code>interrupt</code></td>
+              <td>Interrupt an active turn.</td>
+              <td>Claude sends Escape to tmux; Codex calls session interrupt; Bamboo foreground native runs report <code>unsupported</code>.</td>
+            </tr>
+            <tr>
+              <td><code>stop</code></td>
+              <td>Stop a session or runtime process.</td>
+              <td>Claude kills tmux session; Codex calls session stop; Bamboo foreground native runs report <code>unsupported</code>.</td>
+            </tr>
+            <tr>
+              <td><code>list</code> / <code>doctor</code></td>
+              <td>Inspect known sessions and runtime availability.</td>
+              <td>Also available globally as <code>pandacode list</code> and <code>pandacode doctor</code>.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>Output Contract</h2>
+      <p><code>exec</code> and <code>resume</code> return compact JSON summaries: state, runtime ids, final message, usage, log path, artifact paths, and short output tails. If a runtime asks for external input, the command returns <code>state: "waiting_for_user"</code> with <code>pending_user_input</code> instead of timing out or failing.</p>
+      <p>The stable high-level states are <code>completed</code>, <code>waiting_for_user</code>, <code>idle</code>, <code>running</code>, <code>timeout</code>, <code>stopped</code>, <code>blocked</code>, <code>failed</code>, and <code>unsupported</code>.</p>
+    </section>
+
+    <section>
+      <h2>Execution Mode</h2>
+      <div class="table">
+        <table>
+          <thead>
+            <tr>
+              <th>Mode</th>
+              <th>Codex</th>
+              <th>Claude</th>
+              <th>Bamboo</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>max</code> / <code>limited</code></td>
+              <td><code>max</code>: <code>--dangerously-full-access</code>; <code>limited</code>: <code>--sandbox workspace-write --approval-policy never</code>.</td>
+              <td><code>max</code>: <code>--dangerously-skip-permissions</code>; <code>limited</code>: <code>--permission-mode acceptEdits</code>.</td>
+              <td><code>max</code>: full Bamboo tool loop; <code>limited</code>: blocks background commands, installs, downloads, and recursive/destructive cleanup.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

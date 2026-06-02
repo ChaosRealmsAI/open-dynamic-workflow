@@ -1,0 +1,22 @@
+[package]
+name = "pandacode"
+version = "0.1.0"
+edition = "2024"
+description = "PandaCode: one CLI shape to run coding tasks across codex, claude, and domestic-LLM (bamboo) runtimes."
+license = "MIT"
+repository = "https://github.com/ChaosRealmsAI/open-dynamic-workflow"
+homepage = "https://github.com/ChaosRealmsAI/open-dynamic-workflow"
+readme = "README.md"
+keywords = ["llm", "agent", "codex", "claude", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+dirs = "6.0"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.48", features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
+toml = "0.9"

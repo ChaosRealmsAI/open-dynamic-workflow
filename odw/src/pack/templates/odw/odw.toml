@@ -1,0 +1,24 @@
+# Open Dynamic Workflow project configuration
+version = "0.1"
+runtime = "odw-direct-js"
+
+[agent_policy]
+default_model = "inherit"
+default_mode = "acceptEdits"
+codex_backend = "codexctl"
+agent_bridge = "pandacode"
+pandacode_bin = "pandacode"
+codex_model = "gpt-5.5"
+codex_effort = "xhigh"
+
+[error_policy]
+schema = ".odw/schemas/error-feedback.schema.json"
+retryable_categories = ["codexctl_rate_limit", "codexctl_network", "codexctl_permission", "codexctl_failed"]
+terminal_categories = ["codexctl_not_found", "codexctl_auth", "codexctl_model", "codexctl_input", "schema_mismatch"]
+
+[workflow_policy]
+primary_user = "Agent or CLI caller"
+orchestration = "Prefer odw exec for agent-authored workflow scripts. Claude Code slash commands are optional compatibility entrypoints."
+max_parallel_agents = 16
+max_agents_per_run = 1000
+resume_surface = "odw exec --resume latest"

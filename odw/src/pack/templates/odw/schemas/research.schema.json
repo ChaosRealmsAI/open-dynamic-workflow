@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Open Dynamic Workflow Research Result",
+  "type": "object",
+  "required": ["summary", "files", "evidence"],
+  "properties": {
+    "summary": { "type": "string" },
+    "files": { "type": "array", "items": { "type": "string" } },
+    "batches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "files"],
+        "properties": {
+          "name": { "type": "string" },
+          "files": { "type": "array", "items": { "type": "string" } },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "note"],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  }
+}

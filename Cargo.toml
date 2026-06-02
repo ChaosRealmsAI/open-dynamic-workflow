@@ -1,0 +1,13 @@
+# Open Dynamic Workflow — Cargo workspace.
+#
+# Two crates ship together so agents get the whole thing out of the box:
+#   odw/        the orchestration runtime (the `odw` binary) — schedules a
+#               workflow graph and dispatches each agent() node to an executor.
+#   pandacode/  the executor (the `pandacode` binary) — runs one coding task
+#               through codex / claude / a domestic LLM and returns a report.
+#
+# odw spawns `pandacode` as a subprocess; the crates share no library code, so
+# either builds on its own (`cargo build -p odw`) or both at once (`cargo build`).
+[workspace]
+resolver = "3"
+members = ["odw", "pandacode"]

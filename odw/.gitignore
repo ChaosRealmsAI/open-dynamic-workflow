@@ -1,0 +1,6 @@
+/target
+/.pandacode
+/.claude/settings.local.json
+__pycache__/
+/.odw/
+/.claude/

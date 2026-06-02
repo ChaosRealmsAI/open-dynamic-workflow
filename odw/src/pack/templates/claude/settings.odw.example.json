@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(odw exec*)",
+      "Bash(odw runs*)",
+      "Bash(odw doctor*)",
+      "Bash(odw validate*)",
+      "Bash(odw init*)",
+      "Bash(pandacode*)",
+      "Bash(git status*)",
+      "Bash(git diff*)"
+    ]
+  }
+}

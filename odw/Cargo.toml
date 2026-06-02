@@ -1,0 +1,21 @@
+[package]
+name = "open-dynamic-workflow"
+version = "0.1.0"
+edition = "2024"
+description = "Open Dynamic Workflow: a Claude-Code-compatible dynamic workflow runner for agent-authored JavaScript workflows."
+license = "MIT"
+repository = "https://github.com/ChaosRealmsAI/open-dynamic-workflow"
+homepage = "https://github.com/ChaosRealmsAI/open-dynamic-workflow"
+readme = "README.md"
+keywords = ["workflow", "agent", "claude", "orchestration", "llm"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "odw"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

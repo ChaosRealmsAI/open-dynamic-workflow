@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Open Dynamic Workflow Codex Result",
+  "type": "object",
+  "required": ["run_id", "status", "changed_files", "verification", "risks", "adapter"],
+  "properties": {
+    "run_id": { "type": "string" },
+    "thread_id": { "type": "string" },
+    "adapter": {
+      "type": "object",
+      "required": ["backend"],
+      "properties": {
+        "backend": { "enum": ["codexctl", "pandacode"] },
+        "runtime": { "type": "string" },
+        "start_command": { "type": "string" },
+        "read_command": { "type": "string" },
+        "stdout_tail": { "type": "string" },
+        "stderr_tail": { "type": "string" }
+      }
+    },
+    "status": { "enum": ["completed", "failed", "needs_input", "stopped"] },
+    "changed_files": { "type": "array", "items": { "type": "string" } },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "status"],
+        "properties": {
+          "command": { "type": "string" },
+          "status": { "enum": ["passed", "failed", "skipped"] },
+          "output_tail": { "type": "string" }
+        }
+      }
+    },
+    "risks": { "type": "array", "items": { "type": "string" } },
+    "error": {
+      "type": ["object", "null"],
+      "properties": {
+        "category": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "next_action": { "type": "string" },
+        "retry_prompt": { "type": "string" }
+      }
+    },
+    "next_action": { "type": "string" }
+  }
+}

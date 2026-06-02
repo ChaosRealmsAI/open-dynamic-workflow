@@ -1,0 +1,6 @@
+{
+  "goal": "Return a minimal Open Dynamic Workflow task plan JSON object for a no-op smoke test.",
+  "prompts": {
+    "plan_decompose": "Return only one JSON object. Do not use markdown. The JSON must match .odw/schemas/task-plan.schema.json exactly enough for required fields. Use status planned, summary no-op smoke plan, one task with id noop, title No-op, prompt Say no changes are required, agentType odw-codex-coder, depends_on empty array, verification empty array. join.strategy all, join.expected_outputs empty array. quality.max_rework_iterations 0, quality.acceptance empty array. Include risks empty array and questions empty array."
+  }
+}

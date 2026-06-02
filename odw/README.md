@@ -211,8 +211,11 @@ agent(...))`.
 
 - `workflow`: a JavaScript module that an agent writes or loads, with
   `export const meta` followed by top-level async workflow code. Input is
-  available as `args`. Workflow scripts are sandboxed orchestration code; file,
-  shell, and code-edit work must go through `agent(...)` executor nodes.
+  available as `args`. Workflow scripts are orchestration-only (no direct
+  filesystem/shell access); file, shell, and code-edit work must go through
+  `agent(...)` executor nodes. The vm context gives that separation and a
+  determinism guard, not a security boundary — treat workflows as trusted code
+  you author, not a way to run untrusted scripts.
 - `phase`: a named stage emitted to live logs and `.odw/runs/*/events.jsonl`.
 - `agent`: a node invocation. The aligned call shape is
   `agent(prompt, { label, phase, runtime, model, schema, schemaDescription, retry, agentType })`.

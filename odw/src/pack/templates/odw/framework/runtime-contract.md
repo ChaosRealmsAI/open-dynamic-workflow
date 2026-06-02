@@ -66,8 +66,10 @@ Documented runtime limits:
 - concurrency capped at `min(16, cpuCores - 2)` agents
 - up to 1,000 agents total per run (runaway-loop backstop; `agent()` throws past it)
 - no mid-run user input except permission prompts
-- workflow scripts are sandboxed orchestration code; file, shell, and code-edit
-  work goes through `agent(...)` executor nodes
+- workflow scripts are orchestration-only (no direct filesystem/shell access);
+  file, shell, and code-edit work goes through `agent(...)` executor nodes. The
+  vm context provides that separation and a determinism guard, not a security
+  boundary — treat workflows as trusted code you author
 - `Date.now()`, `Math.random()`, and argless `new Date()` throw inside workflow
   scripts to keep resume deterministic
 - `budget.total` (from `args.budget.total`) enforces a token ceiling: once

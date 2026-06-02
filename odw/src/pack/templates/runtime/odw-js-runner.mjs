@@ -1659,6 +1659,11 @@ async function runPandaCode(prompt, options) {
   }
   if (runtime === "codex") {
     args.push("--codexctl-bin", codexctlBin);
+    // Least privilege by default: codex runs sandboxed to the working directory
+    // (workspace-write) rather than --dangerously-full-access. Authors can opt a
+    // node up with { permission: "max" } when a task genuinely needs broader access.
+    const permission = options.permission === "max" ? "max" : "limited";
+    args.push("--permission", permission);
   }
   const result = await runPandaCodeCommand(runtime, "exec", args, execCwd);
   return autoAnswerNeedsInput(result, runtime, session, execCwd, timeoutMs);

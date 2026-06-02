@@ -65,6 +65,12 @@ export interface AgentOptions {
   sandbox?: string;
   approvalPolicy?: string;
   /**
+   * Codex permission mode. Defaults to "limited" (sandboxed to the working dir,
+   * workspace-write). Set "max" for --dangerously-full-access when a task
+   * genuinely needs access beyond the project directory. Codex runtime only.
+   */
+  permission?: "limited" | "max";
+  /**
    * Optional final-response schema. The node still performs its normal work
    * first; this schema only constrains the final assistant response returned
    * to the workflow runner.

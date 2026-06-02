@@ -378,7 +378,9 @@ runtime behaviors:
   usage. Nodes without token usage report 0 and mark the budget `approx`;
   `budget.remaining()` tracks it; once spent reaches total, the next
   `agent(...)` throws. `spent` persists across `--resume` and is not
-  double-counted for cached nodes.
+  double-counted for cached nodes. It is best-effort, not a hard cap: under
+  concurrency, in-flight nodes still finish, so a run can overshoot by up to
+  ~`concurrency × per-node tokens` (as the built-in tool's budget also does).
 - **`workflow(nameOrRef, args)`.** Run a saved/sibling workflow inline as one
   step. It shares this run's agent counter, concurrency caps, budget, and state.
   1 level only: a sub-workflow that calls `workflow()` throws. Names resolve to

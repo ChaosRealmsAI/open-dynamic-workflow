@@ -73,7 +73,11 @@ Documented runtime limits:
 - `Date.now()`, `Math.random()`, and argless `new Date()` throw inside workflow
   scripts to keep resume deterministic
 - `budget.total` (from `args.budget.total`) enforces a token ceiling: once
-  `budget.spent()` reaches it, the next `agent(...)` throws
+  `budget.spent()` reaches it, the next `agent(...)` throws. It is a best-effort
+  ceiling, not a hard cap: under concurrency, nodes already in flight when the
+  limit is crossed still finish, so a `parallel`/`pipeline` run can overshoot by
+  up to ~`concurrency × per-node tokens` (the built-in tool's budget behaves the
+  same). Use it to bound runaway loops, not for exact spend control.
 - `agent(..., { isolation: "worktree" })` runs the executor in a throwaway git
   worktree branched from cwd, removed when the node finishes
 - `workflow(nameOrRef, args)` runs a saved/sibling workflow inline (1 level),

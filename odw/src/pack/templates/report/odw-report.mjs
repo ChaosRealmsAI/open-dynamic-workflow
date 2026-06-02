@@ -236,12 +236,15 @@ const vendorRel = (file) => {
 };
 const sub = (s) => () => s;
 const escAttr = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+// JSON embedded in a <script> must not let a "</script>" inside a string (e.g. a
+// prompt built from untrusted input) close the tag early — escape `<` to <.
+const scriptJson = (value) => JSON.stringify(value).replace(/</g, "\\u003c");
 const html = TEMPLATE
   .replace(/__TITLE__/g, sub(escAttr(name)))
   .replace(/__SUBTITLE__/g, sub(escAttr(`${backend} · ${status} · ${aiNodes.length} nodes · ${totalTokens.toLocaleString("en-US")} tokens`)))
   .replace("__GRAPH__", sub(mermaid()))
-  .replace("__NODES__", sub(JSON.stringify(njson)))
-  .replace("__OVERVIEW__", sub(JSON.stringify(overview)))
+  .replace("__NODES__", sub(scriptJson(njson)))
+  .replace("__OVERVIEW__", sub(scriptJson(overview)))
   .replace("__MERMAID__", sub(vendorRel("mermaid.min.js")))
   .replace("__MARKED__", sub(vendorRel("marked.min.js")));
 

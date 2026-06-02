@@ -38,6 +38,17 @@ deterministically after a crash. `odw` is the open version:
   count, and duration — parsed straight from your code, no guesswork.
 - **Resumable & isolated.** Deterministic resume from a journal; optional
   git-worktree isolation so parallel agents that edit files never collide.
+- **Cheaper at scale.** Because each node can run on a low-cost domestic model
+  instead of a Claude subagent, the same 12-node fan-out + synthesis cost ~79k
+  tokens on `odw` (heterogeneous models) vs ~252k on the built-in tool
+  (Claude-only) in a head-to-head dogfood run — ~3× fewer tokens. (Validated up
+  to 100 real parallel nodes; the concurrency cap held at `min(16, cores-2)`.)
+
+**When the built-in tool is the better choice:** it needs zero setup, each node
+is a full Claude subagent with the entire Claude Code toolset (MCP, web, etc.),
+and it runs inside your session for live watching and shared context. Reach for
+`odw` when you want heterogeneous/cheaper models, persistent offline
+observability, deterministic resume, or a self-hostable, headless runner.
 
 ## Install
 

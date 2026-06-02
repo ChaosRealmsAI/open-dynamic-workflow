@@ -740,6 +740,16 @@ return {ok:true};`);
   assert(!/PANDACODE_DONE/.test(r.out), "PANDACODE_DONE marker leaked into the node result");
 });
 
+test("budget: every dispatched attempt accrues tokens, even failed/retried ones", () => {
+  const r = run(`export const meta={name:"bgt"};
+const res = await agent("x",{label:"x", mockFail:true, mockRetryable:true, maxAttempts:3, mockTokens:100});
+log("SPENT="+budget.spent()+" failed="+(res?.ok===false));
+return {ok:true};`, { input: { budget: { total: 1000000 } } });
+  assert(r.code === 0, `run failed: ${r.out.slice(-200)}`);
+  // 3 attempts × 100 tokens accrue even though the node ultimately fails.
+  assert(/SPENT=300 failed=true/.test(r.out), `budget under/over-counted retries: ${(r.out.match(/SPENT=\S+ failed=\S+/) || [])[0]}`);
+});
+
 // ---- run all --------------------------------------------------------------
 let pass = 0;
 const failures = [];

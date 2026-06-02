@@ -205,6 +205,10 @@ globalThis.agent = async (prompt, options = {}) => {
     emit({ type: "agent_start", index: agentIndex, key, label, phase, agentType, runtime: displayRuntime, model: displayModel, promptPreview, config: nodeConfig, attempt, maxAttempts });
     try {
       const rawResult = await runAgent(attemptPrompt, { ...normalizedOptions, attempt, previousFailure });
+      // Count every dispatched attempt's tokens. A node that retries or ultimately
+      // fails still burned tokens, so accruing only on success undercounts the
+      // budget and lets budget-bounded loops overrun.
+      accrueBudget(rawResult);
       const result = normalizeNodeResult(rawResult, normalizedOptions, schema);
       if (rawResult && rawResult.__worktree && result && typeof result === "object" && !Array.isArray(result)) {
         result.worktree = rawResult.__worktree;
@@ -217,7 +221,6 @@ globalThis.agent = async (prompt, options = {}) => {
       const structuredFailure = Boolean(result?.ok === false && errorFeedbackValidation?.valid);
       const ok = result?.ok !== false && validation.valid;
       if (ok) {
-        accrueBudget(rawResult);
         // Built-in parity: with no schema, return the executor's final text (or a
         // lean {text, worktree} when a worktree captured changes) instead of the
         // verbose raw report. Schema'd nodes keep their validated object.
@@ -1345,6 +1348,17 @@ async function dispatchBackend(prompt, options) {
     const mockTokens = Number(options.mockTokens);
     if (Number.isFinite(mockTokens) && mockTokens > 0 && mockResult && typeof mockResult === "object" && !mockResult.codex) {
       mockResult.codex = { usage: { tokenUsage: { total: { totalTokens: mockTokens } } } };
+    }
+    // Mock-only: force a node failure (optionally retryable) so retry, failure
+    // propagation, and budget-accrual-on-failed-attempts are testable for free.
+    if (options.mockFail && mockResult && typeof mockResult === "object") {
+      mockResult.ok = false;
+      mockResult.state = "failed";
+      mockResult.error = {
+        category: "mock_failed",
+        message: "mock forced failure",
+        retryable: Boolean(options.mockRetryable)
+      };
     }
     // Mock-only: stand in for an executor that resolved a concrete model the
     // script left implicit, so the model-backfill (inherit -> real) is testable.

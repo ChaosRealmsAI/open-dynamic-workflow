@@ -2093,25 +2093,49 @@ fn write_run_record(root: &Path, run_dir: &Path, input: RunRecordInput<'_>) -> R
 }
 
 fn resolve_run_dir(root: &Path, run_id: &str) -> Result<PathBuf> {
+    let runs = root.join(".odw/runs");
     if run_id == "latest" {
-        let latest = root.join(".odw/runs/latest.json");
+        let latest = runs.join("latest.json");
         let content =
             fs::read_to_string(&latest).with_context(|| format!("read {}", latest.display()))?;
         let value = serde_json::from_str::<serde_json::Value>(&content)
             .with_context(|| format!("parse {}", latest.display()))?;
-        if let Some(path) = json_string(&value, "run_dir") {
-            return Ok(PathBuf::from(path));
-        }
+        // Prefer re-deriving from the recorded run_id (a flat, validated name);
+        // only honor a recorded run_dir that stays under .odw/runs, so a tampered
+        // latest.json cannot redirect reads to an arbitrary path.
         if let Some(id) = json_string(&value, "run_id") {
-            return Ok(root.join(".odw/runs").join(id));
+            return safe_run_dir(&runs, &id);
+        }
+        if let Some(path) = json_string(&value, "run_dir") {
+            let path = PathBuf::from(path);
+            if path.starts_with(&runs) {
+                return Ok(path);
+            }
+            bail!("{} run_dir is outside .odw/runs", latest.display());
         }
         bail!("{} does not contain run_id", latest.display());
     }
-    Ok(root.join(".odw/runs").join(run_id))
+    safe_run_dir(&runs, run_id)
+}
+
+// A run id is a single run-directory name; reject anything that could traverse
+// out of .odw/runs (a separator, "..", or the "latest" sentinel).
+fn safe_run_dir(runs: &Path, run_id: &str) -> Result<PathBuf> {
+    if run_id.is_empty()
+        || run_id == "latest"
+        || run_id.contains('/')
+        || run_id.contains('\\')
+        || run_id.contains("..")
+    {
+        bail!("invalid run id (must be a single run directory name): {run_id}");
+    }
+    Ok(runs.join(run_id))
 }
 
 fn read_tail_lines(path: &Path, tail: usize) -> Result<Vec<serde_json::Value>> {
     let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    // Bound the work even if a caller passes an absurd --tail.
+    let tail = tail.min(1_000_000);
     let mut lines = content.lines().rev().take(tail).collect::<Vec<_>>();
     lines.reverse();
     Ok(lines

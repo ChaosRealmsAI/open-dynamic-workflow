@@ -64,9 +64,13 @@ Then scaffold a project and check the executor wiring:
 ```bash
 odw init --path /path/to/project      # writes the pack (below)
 odw validate --path /path/to/project  # asserts the pack is intact
-odw doctor                            # checks runtimes + binaries (exits non-zero if unhealthy)
-export ODW_PANDACODE_BIN=/path/to/pandacode   # if `pandacode` is not on PATH
+odw doctor                            # checks node + runtimes + binaries (exits non-zero if unhealthy)
 ```
+
+`odw` finds the `pandacode` binary automatically when it sits next to `odw` (the
+workspace builds both into the same dir, whether `cargo install` or `cargo
+build`). Only set `ODW_PANDACODE_BIN=/path/to/pandacode` (or `--pandacode-bin`)
+if yours lives elsewhere.
 
 `odw init` writes:
 

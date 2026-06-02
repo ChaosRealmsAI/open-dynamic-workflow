@@ -1369,7 +1369,22 @@ fn exec_script(args: ExecArgs) -> Result<()> {
 
     let script = match (&args.script, &resume_record) {
         (Some(script), _) if script.is_absolute() => script.clone(),
-        (Some(script), _) => root.join(script),
+        // A relative --script resolves against --path (so project-internal
+        // workflows like .claude/workflows/x.js work), but fall back to the
+        // current directory when it is not found there — that is where a user who
+        // typed the path expects it, especially when --path points elsewhere.
+        (Some(script), _) => {
+            let in_root = root.join(script);
+            if in_root.exists() {
+                in_root
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(script))
+                    .ok()
+                    .filter(|candidate| candidate.exists())
+                    .unwrap_or(in_root)
+            }
+        }
         (None, Some(record)) => json_string(record, "workflow")
             .map(PathBuf::from)
             .ok_or_else(|| anyhow::anyhow!("resumed run does not record a workflow script"))?,

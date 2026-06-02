@@ -247,10 +247,15 @@ agent(...))`.
   `fanout(items, (item, index) => agent(...))`.
 - `schema`: schema use is opt-in. If a workflow author passes
   `agent(..., { schema, schemaDescription, retry })`, ODW appends the full JSON
-  Schema as a final-response-only contract, validates that final response,
-  injects schema mismatch context into the same node prompt, and retries before
-  returning structured `schema_mismatch` feedback. If `schema` is omitted, ODW
-  applies no default schema.
+  Schema as a final-response-only contract, validates that final response, and on
+  a mismatch injects the mismatch context into the node prompt and retries.
+  **Retry is NOT automatic: a node attempts once by default** (`maxAttempts:1`),
+  unlike the built-in tool which keeps retrying on mismatch — pass
+  `retry: { maxAttempts: N }` (or `maxAttempts: N`) for built-in-style retry,
+  else a single non-conforming reply returns structured `schema_mismatch`
+  feedback immediately. Route schema nodes to claude (coding agents like codex/
+  bamboo are unreliable at structured output). If `schema` is omitted, ODW applies
+  no default schema.
 - `error feedback`: `.odw/schemas/error-feedback.schema.json` is the standard
   result when a worker, command, schema, or CodexCTL step fails.
 

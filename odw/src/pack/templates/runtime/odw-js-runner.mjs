@@ -1784,6 +1784,9 @@ function normalizePandaCodeReport(report, context) {
     ok: report.ok === false || exitFailed ? false : report.ok,
     backend: "pandacode",
     runtime,
+    // Preserve the model the executor actually used, read from the raw report
+    // before compaction drops it, so observability can show it (vs "inherit").
+    model: report.summary?.model || report.record?.model || report.model || undefined,
     action,
     session: report.session || record?.session || "",
     state: report.state || summary?.status || "unknown",

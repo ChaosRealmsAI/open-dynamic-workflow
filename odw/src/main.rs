@@ -593,19 +593,27 @@ fn pack_human_status(value: &serde_json::Value) -> String {
     if value_ok(value) {
         "valid".to_string()
     } else {
-        let missing = value
+        let missing: Vec<&str> = value
             .get("missing")
             .and_then(|field| field.as_array())
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(|item| item.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .filter(|items| !items.is_empty())
-            .unwrap_or_else(|| "pack files".to_string());
-        format!("invalid or incomplete ({missing}) - run `odw init --path . --force` if intended")
+            .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
+            .unwrap_or_default();
+        // A fresh checkout is missing the whole pack; dumping 50+ paths buries the
+        // one thing the user needs to do. Show a short, actionable line instead.
+        if missing.len() >= 10 {
+            return "not installed - run `odw init --path .`".to_string();
+        }
+        let detail = if missing.is_empty() {
+            "pack files".to_string()
+        } else {
+            let shown = missing.iter().take(4).copied().collect::<Vec<_>>().join(", ");
+            if missing.len() > 4 {
+                format!("{shown}, +{} more", missing.len() - 4)
+            } else {
+                shown
+            }
+        };
+        format!("incomplete ({detail}) - run `odw init --path . --force` if intended")
     }
 }
 

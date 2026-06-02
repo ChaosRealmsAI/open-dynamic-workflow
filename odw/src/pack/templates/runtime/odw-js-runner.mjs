@@ -531,7 +531,8 @@ function validateAgainstSchema(value, schema, path, issues) {
     if (!matched) {
       issues.push(`${path} must match one of ${schema.oneOf.length} schema variants`);
     }
-    return;
+    // Do NOT return: JSON Schema applies oneOf AND any sibling keywords (type,
+    // required, properties, …). Falling through checks those too.
   }
   if (schema.const !== undefined && JSON.stringify(value) !== JSON.stringify(schema.const)) {
     issues.push(`${path} must equal ${JSON.stringify(schema.const)}`);
@@ -771,7 +772,10 @@ function extractJsonObjectStrings(text) {
 function normalizeCodexPlanResult(report) {
   const result = { ...report };
   const codex = result.codex && typeof result.codex === "object" ? result.codex : {};
-  const sourceStatus = result.status || codex.status || (result.ok === false ? "failed" : "completed");
+  // pandacode reports carry the lifecycle as `state` (incl. "waiting_for_user");
+  // include it so a needs-input turn isn't misread as a completed plan.
+  const rawState = result.status || result.state || codex.status || codex.state || (result.ok === false ? "failed" : "completed");
+  const sourceStatus = rawState === "waiting_for_user" ? "needs_input" : rawState;
   result.status = sourceStatus === "needs_input" ? "needs_input" : sourceStatus === "failed" || result.ok === false ? "failed" : "planned";
   result.run_id = result.run_id || codex.run_id || result.runId;
   result.thread_id = result.thread_id || codex.thread_id || codex.threadId || result.threadId;
@@ -817,7 +821,10 @@ function normalizeCodexImplementationResult(report) {
   const codex = result.codex && typeof result.codex === "object" ? result.codex : {};
   result.run_id = result.run_id || codex.run_id || result.runId || "";
   result.thread_id = result.thread_id || codex.thread_id || codex.threadId || result.threadId;
-  const sourceStatus = result.status || codex.status || (result.ok === false ? "failed" : "completed");
+  // Include pandacode's `state` field (incl. "waiting_for_user" -> needs_input)
+  // so a needs-input codex turn isn't misreported as a completed implementation.
+  const rawState = result.status || result.state || codex.status || codex.state || (result.ok === false ? "failed" : "completed");
+  const sourceStatus = rawState === "waiting_for_user" ? "needs_input" : rawState;
   result.status = ["completed", "failed", "needs_input", "stopped"].includes(sourceStatus)
     ? sourceStatus
     : result.ok === false

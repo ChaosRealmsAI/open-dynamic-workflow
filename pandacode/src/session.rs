@@ -54,33 +54,29 @@ pub fn save(root: &Path, record: &mut SessionRecord) -> Result<()> {
     let dir = runtime_dir(root, &record.runtime);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = record_path(root, &record.runtime, &record.session);
-    fs::write(
-        &path,
-        format!("{}\n", serde_json::to_string_pretty(record)?),
-    )
-    .with_context(|| format!("write {}", path.display()))?;
-    fs::write(
-        latest_path(root, &record.runtime),
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&json!({
-                "runtime": record.runtime,
-                "session": record.session,
-                "updated_ms": record.updated_ms
-            }))?
-        ),
-    )?;
-    fs::write(
-        global_latest_path(root),
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&json!({
-                "runtime": record.runtime,
-                "session": record.session,
-                "updated_ms": record.updated_ms
-            }))?
-        ),
-    )?;
+    write_atomic(&path, &format!("{}\n", serde_json::to_string_pretty(record)?))?;
+    let pointer = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&json!({
+            "runtime": record.runtime,
+            "session": record.session,
+            "updated_ms": record.updated_ms
+        }))?
+    );
+    write_atomic(&latest_path(root, &record.runtime), &pointer)?;
+    write_atomic(&global_latest_path(root), &pointer)?;
+    Ok(())
+}
+
+// Write a file atomically (per-process tmp + rename) so two `pandacode` processes
+// running in the same project dir can't interleave and leave a torn `latest.json`.
+fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    fs::write(&tmp, content).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
 

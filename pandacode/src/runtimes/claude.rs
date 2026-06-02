@@ -181,6 +181,27 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
     output_json(&report?)
 }
 
+// Tears down a tmux session we started for this turn if the turn errors out
+// before its own cleanup runs (or completes normally), so no `?` early-return
+// can leak the session. Disarmed only when the turn parks waiting for the user.
+struct StartedSessionGuard<'a> {
+    tmux_bin: &'a str,
+    session: &'a str,
+    armed: bool,
+}
+impl StartedSessionGuard<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for StartedSessionGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = kill_tmux_session_if_exists(self.tmux_bin, self.session);
+        }
+    }
+}
+
 fn resume(args: TaskCommandArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
     let task = crate::io::read_task(
@@ -217,6 +238,12 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
             permission,
         )?;
     }
+    // From here on, any `?` failure tears down a session we just started.
+    let mut session_guard = StartedSessionGuard {
+        tmux_bin: &args.bins.tmux_bin,
+        session: &tmux,
+        armed: started_for_turn,
+    };
     let prompt_file = write_prompt_file(&root, RUNTIME, &record.session, &task)?;
     let dispatch_task = crate::io::dispatch_task_for_transport(&task, &prompt_file);
     let marker = format!(
@@ -283,9 +310,12 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         "wait": wait,
         "record": record
     });
-    if started_for_turn && report["state"] != "waiting_for_user" {
-        let _ = kill_tmux_session_if_exists(&args.bins.tmux_bin, &tmux);
+    if report["state"] == "waiting_for_user" {
+        // Keep the session parked for the next answer turn.
+        session_guard.disarm();
     }
+    // session_guard drops at the end of scope: it kills the session on the normal
+    // non-waiting path AND on any `?` error above, so the session never leaks.
     output_json(&report)
 }
 

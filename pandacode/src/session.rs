@@ -207,7 +207,11 @@ fn runtime_dir(root: &Path, runtime: &str) -> PathBuf {
 }
 
 fn record_path(root: &Path, runtime: &str, session: &str) -> PathBuf {
-    runtime_dir(root, runtime).join(format!("{session}.json"))
+    // Sanitize the session into a single filename component (same as the exec
+    // path does) so a `--session ../../x` can't read/write outside the runtime
+    // dir — separators are stripped, so the result can never traverse.
+    let safe = crate::io::sanitize_name(session, runtime);
+    runtime_dir(root, runtime).join(format!("{safe}.json"))
 }
 
 fn latest_path(root: &Path, runtime: &str) -> PathBuf {
@@ -246,5 +250,17 @@ mod tests {
         let error = resolve_session(&root, "claude", "latest").unwrap_err();
         assert!(error.to_string().contains("no latest claude session"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn record_path_sanitizes_session_no_traversal() {
+        let root = Path::new("/project");
+        let dir = runtime_dir(root, "claude");
+        let p = record_path(root, "claude", "../../../etc/passwd");
+        // Stays inside the runtime dir; separators stripped, so no traversal.
+        assert!(p.starts_with(&dir), "escaped runtime dir: {}", p.display());
+        assert!(!p.to_string_lossy().contains("/etc/passwd"));
+        // A normal session still maps to <session>.json under the runtime dir.
+        assert_eq!(record_path(root, "claude", "abc-1.2"), dir.join("abc-1.2.json"));
     }
 }

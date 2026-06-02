@@ -104,6 +104,12 @@ export interface ParallelOptions {
 
 export interface WorkflowBudget {
   total: number | null;
+  /**
+   * Sum of each node's TOTAL tokens (input + output + cache + reasoning), not
+   * output-only as in the built-in tool. Coding-agent nodes are input-dominated
+   * (a trivial node can be ~19k total / <300 output), so budgets here should be
+   * sized in total tokens — a loop ported from the built-in exhausts far sooner.
+   */
   spent(): number;
   /** Remaining tokens, or `Infinity` when no `total` is set (guard on `total`). */
   remaining(): number;

@@ -380,13 +380,17 @@ runtime behaviors:
   `parallel(...)` group do not conflict. The worktree is removed on success,
   error, or timeout. Requires `cwd` to be a git repo.
 - **Real `budget`.** Seed `args.budget.total` (tokens). `budget.spent()` sums
-  real token usage from PandaCode reports, including Bamboo reports that include
-  usage. Nodes without token usage report 0 and mark the budget `approx`;
-  `budget.remaining()` tracks it; once spent reaches total, the next
-  `agent(...)` throws. `spent` persists across `--resume` and is not
-  double-counted for cached nodes. It is best-effort, not a hard cap: under
-  concurrency, in-flight nodes still finish, so a run can overshoot by up to
-  ~`concurrency × per-node tokens` (as the built-in tool's budget also does).
+  each node's **total** token usage (input + output + cache + reasoning) from
+  PandaCode reports. **This differs from the built-in tool, whose `spent()` counts
+  output tokens only** — and the gap is large for coding-agent nodes, whose cost
+  is dominated by the input harness (a trivial Bamboo node can report ~19k total
+  but <300 output). So a budget loop ported from the built-in exhausts far sooner
+  here; size budgets in *total* tokens, not output. Nodes without token usage
+  report 0 and mark the budget `approx`; `budget.remaining()` tracks it; once
+  spent reaches total, the next `agent(...)` throws. `spent` persists across
+  `--resume` and is not double-counted for cached nodes. It is best-effort, not a
+  hard cap: under concurrency, in-flight nodes still finish, so a run can overshoot
+  by up to ~`concurrency × per-node tokens` (as the built-in tool's budget also does).
 - **`workflow(nameOrRef, args)`.** Run a saved/sibling workflow inline as one
   step. It shares this run's agent counter, concurrency caps, budget, and state.
   1 level only: a sub-workflow that calls `workflow()` throws. Names resolve to

@@ -116,6 +116,13 @@ const cn = await agent("Implement the requested change.", {
   label: "bamboo-impl"
 });
 
+// Heterogeneous fan-out — each node a DIFFERENT model, then reconcile (this is
+// odw's edge over the built-in tool; the report shows each node's real model):
+const takes = await parallel(
+  ["deepseek", "qwen", "kimi"].map((p) => () =>
+    agent(QUESTION, { runtime: "bamboo", provider: p, label: `ask:${p}` })));
+const best = await agent(`Reconcile:\n${takes.join("\n\n")}`, { runtime: "claude" });
+
 // Budget-bounded loop (scale work to a token target):
 while (budget.total && budget.remaining() > 50_000) {
   const r = await agent("Find one more bug.", { schema: BUG });
@@ -157,6 +164,10 @@ odw exec --script wf.js --backend pandacode --json
   to branch on structured fields.
 - **Failure is data:** a failed node returns `{ ok:false, error:{ category, ... } }`
   — check it / `.filter(Boolean)` parallel results; don't assume success.
+- **Bamboo is a coding agent:** great for file edits / commands. For a node whose
+  output is pure prose (a review, an analysis), pass a `schema:` (forces parseable
+  structured output) or use `runtime:"claude"` / `"codex"` — otherwise it can fail
+  with `missing JSON object in model response`.
 - **Concurrency:** `parallel`/`pipeline` cap at `min(16, cores-2)`; a 1000-agent
   per-run backstop guards runaway loops.
 

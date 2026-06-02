@@ -2099,7 +2099,11 @@ function stripCompletionMarker(text) {
 }
 
 function readPandaCodeLastAssistantMessage(report) {
-  const direct = firstText(
+  // Strip BEFORE deciding: the tmux-scraped field is sometimes only the
+  // completion marker, which strips to "". Treat that as empty and fall through
+  // to the hook event log (whose Stop payload carries Claude Code's real
+  // last_assistant_message) instead of returning a blank reply.
+  const direct = stripCompletionMarker(firstText(
     report?.last_agent_message,
     report?.lastAgentMessage,
     report?.summary?.last_agent_message,
@@ -2107,9 +2111,9 @@ function readPandaCodeLastAssistantMessage(report) {
     // Bamboo (domestic-model) reports carry the final assistant text as the
     // summary's `summary` field rather than `last_agent_message`.
     report?.summary?.summary
-  );
+  ));
   if (direct) {
-    return stripCompletionMarker(direct);
+    return direct;
   }
   const eventLog = firstText(
     report?.record?.artifacts?.event_log,
@@ -2138,14 +2142,14 @@ function readPandaCodeLastAssistantMessage(report) {
       // for the last assistant message in the remaining (valid) lines.
       continue;
     }
-    const message = firstText(
+    const message = stripCompletionMarker(firstText(
       event?.payload?.last_assistant_message,
       event?.payload?.lastAssistantMessage,
       event?.last_assistant_message,
       event?.lastAssistantMessage
-    );
+    ));
     if (message) {
-      return stripCompletionMarker(message);
+      return message;
     }
   }
   return "";

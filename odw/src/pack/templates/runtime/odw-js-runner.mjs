@@ -1627,9 +1627,19 @@ async function runPandaCode(prompt, options) {
   // options.timeoutMs is already in milliseconds; options.timeout / the CLI
   // --timeout default are in SECONDS. Keep the units separate so a small ms value
   // is not silently multiplied by 1000.
-  const timeoutMs = options.timeoutMs != null && options.timeoutMs !== ""
-    ? parseTimeout(options.timeoutMs, "ms")
-    : parseTimeout(options.timeout ?? timeout, "s");
+  let timeoutMs;
+  if (options.timeoutMs != null && options.timeoutMs !== "") {
+    timeoutMs = parseTimeout(options.timeoutMs, "ms");
+  } else if (options.timeout != null && options.timeout !== "") {
+    timeoutMs = parseTimeout(options.timeout, "s");
+  } else {
+    // No per-node timeout pinned. Real codex coding tasks (implement / fix / run
+    // tests) routinely run for minutes, so a 120s default silently truncates
+    // them. Floor codex at 10 min; bamboo/claude (chat) keep the run-level
+    // default. An explicit options.timeout / --timeout still wins above.
+    const base = parseTimeout(timeout, "s");
+    timeoutMs = runtime === "codex" ? Math.max(base ?? 0, 600_000) : base;
+  }
   if (timeoutMs) {
     args.push("--timeout-ms", String(timeoutMs));
   }

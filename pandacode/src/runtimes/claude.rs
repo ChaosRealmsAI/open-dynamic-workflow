@@ -163,7 +163,8 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
                 "output_tail": output_tail,
                 "last_agent_message": last_agent_message,
                 "model": record.model,
-                "effort": record.effort
+                "effort": record.effort,
+                "usage": record.thread_path.as_deref().and_then(claude_usage_from_transcript)
             },
             "pending_user_input": pending_user_input,
             "artifacts": record.artifacts,
@@ -274,7 +275,8 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
             "output_tail": output_tail,
             "last_agent_message": last_agent_message,
             "model": record.model,
-            "effort": record.effort
+            "effort": record.effort,
+            "usage": record.thread_path.as_deref().and_then(claude_usage_from_transcript)
         },
         "pending_user_input": pending_user_input,
         "artifacts": record.artifacts,
@@ -870,6 +872,51 @@ fn fill_claude_session_from_events(root: &Path, tmux: &str, record: &mut Session
     }
 }
 
+// Claude Code only exposes per-turn token usage in its session transcript (the
+// rollout .jsonl whose path the Stop hook reports as `transcript_path`, captured
+// into record.thread_path). Sum the assistant messages' usage so odw can count
+// claude tokens against a budget. For a single-turn node this is exact; on a
+// multi-step (tool-using) turn it conservatively over-counts cached input, which
+// is budget-safe (never under-counts).
+fn claude_usage_from_transcript(transcript_path: &str) -> Option<Value> {
+    let content = std::fs::read_to_string(transcript_path).ok()?;
+    let (mut input, mut output, mut cache_read, mut cache_creation) = (0i64, 0i64, 0i64, 0i64);
+    let mut found = false;
+    for line in content.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let message = event.get("message");
+        let role = message
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            .or_else(|| event.get("type").and_then(|t| t.as_str()));
+        if role != Some("assistant") {
+            continue;
+        }
+        let Some(usage) = message.and_then(|m| m.get("usage")).or_else(|| event.get("usage"))
+        else {
+            continue;
+        };
+        let field = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
+        input += field("input_tokens");
+        output += field("output_tokens");
+        cache_read += field("cache_read_input_tokens");
+        cache_creation += field("cache_creation_input_tokens");
+        found = true;
+    }
+    if !found {
+        return None;
+    }
+    Some(json!({
+        "total_tokens": input + output + cache_read + cache_creation,
+        "input_tokens": input,
+        "output_tokens": output,
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_creation
+    }))
+}
+
 fn with_completion_marker(task: &str, marker: &str) -> String {
     format!(
         "{task}\n\nCompletion protocol:\nWhen this turn is complete, end your final response with this exact marker on its own line:\n{marker}"
@@ -1445,5 +1492,28 @@ mod tests {
             strip_completion_marker(Value::String("done".into()), marker),
             Value::String("done".into())
         );
+    }
+
+    #[test]
+    fn claude_usage_sums_assistant_transcript_tokens() {
+        let dir = std::env::temp_dir()
+            .join(format!("pandacode-claude-usage-{}", crate::io::now_millis()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("transcript.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"user","message":{"role":"user","content":"hi"}}
+{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":1000,"cache_creation_input_tokens":50}}}
+{"type":"assistant","message":{"role":"assistant","usage":{"input_tokens":10,"output_tokens":5}}}
+"#,
+        )
+        .unwrap();
+        let usage = claude_usage_from_transcript(path.to_str().unwrap()).unwrap();
+        assert_eq!(usage["total_tokens"], 100 + 20 + 1000 + 50 + 10 + 5);
+        assert_eq!(usage["output_tokens"], 25);
+        assert_eq!(usage["cache_read_input_tokens"], 1000);
+        // Missing file / no assistant usage -> None (not a fake zero).
+        assert!(claude_usage_from_transcript("/no/such/file.jsonl").is_none());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

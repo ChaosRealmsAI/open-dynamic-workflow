@@ -134,8 +134,12 @@ async fn run_turn(
         args.common.stdin.as_deref(),
         Some(&root),
     )?;
-    let provider = effective_provider(args.provider.as_deref(), provider_from_record(&record))?;
     let model = effective_model(args.common.model.as_deref(), record.model.as_deref());
+    let provider = effective_provider(
+        args.provider.as_deref(),
+        provider_from_record(&record),
+        model.as_deref(),
+    )?;
     let effort = effective_effort(args.common.effort, record.effort.as_deref());
     let permission = effective_permission(args.common.permission, record.permission.as_deref());
     let generation = effective_generation(&args.generation, &record)?;
@@ -371,7 +375,7 @@ async fn doctor(args: BambooRuntimeGlobalArgs) -> Result<()> {
 }
 
 pub async fn doctor_report(root: &Path, _bins: &crate::cli::RuntimeBins) -> Result<Value> {
-    let provider = effective_provider(None, None)?;
+    let provider = effective_provider(None, None, None)?;
     let partial = config::resolve_partial(
         &ProviderOverrides {
             provider: Some(provider),
@@ -489,9 +493,19 @@ fn bamboo_run_store(root: &Path) -> PathBuf {
     crate::io::pandacode_dir(root).join(RUNTIME).join("runs")
 }
 
-fn effective_provider(explicit: Option<&str>, stored: Option<&str>) -> Result<ProviderKind> {
+fn effective_provider(
+    explicit: Option<&str>,
+    stored: Option<&str>,
+    model: Option<&str>,
+) -> Result<ProviderKind> {
     if let Some(provider) = explicit.or(stored) {
         return parse_provider(provider);
+    }
+    // No provider hint, but a model uniquely determines its provider — infer it.
+    // Without this, `--model qwen3.7-max` (no --provider) falls through to the
+    // default provider (deepseek), which rejects it with a 400.
+    if let Some(provider) = model.and_then(crate::models::provider_for_model) {
+        return Ok(provider);
     }
     if let Ok(provider) = std::env::var("PANDACODE_BAMBOO_PROVIDER") {
         return parse_provider(&provider);
@@ -1247,4 +1261,36 @@ fn truncate_for_resume(value: &str, max_chars: usize) -> String {
         output.push(ch);
     }
     output.replace('\n', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_inferred_from_model_when_no_explicit_provider() {
+        // The reported bug: `--model qwen3.7-max` with no `--provider` must
+        // route to qwen, not the default (deepseek) — else the deepseek API
+        // 400s on an unknown model.
+        let p = effective_provider(None, None, Some("qwen3.7-max")).unwrap();
+        assert_eq!(p, ProviderKind::Qwen);
+        let p = effective_provider(None, None, Some("kimi-k2.6")).unwrap();
+        assert_eq!(p, ProviderKind::Kimi);
+    }
+
+    #[test]
+    fn explicit_provider_beats_model_inference() {
+        // An explicit --provider always wins, even if the model says otherwise.
+        let p = effective_provider(Some("deepseek"), None, Some("qwen3.7-max")).unwrap();
+        assert_eq!(p, ProviderKind::Deepseek);
+    }
+
+    #[test]
+    fn unknown_model_falls_back_to_default_provider() {
+        let p = effective_provider(None, None, Some("not-a-real-model")).unwrap();
+        assert_eq!(p, parse_provider(DEFAULT_PROVIDER).unwrap());
+        // And with no model at all, the default still holds.
+        let p = effective_provider(None, None, None).unwrap();
+        assert_eq!(p, parse_provider(DEFAULT_PROVIDER).unwrap());
+    }
 }

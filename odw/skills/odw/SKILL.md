@@ -162,8 +162,10 @@ odw exec --script wf.js --backend pandacode --json
 - **Schema vs no schema:** no schema → final **text string**; schema → validated
   **object** (the node still does its real work first). Use a schema when you need
   to branch on structured fields.
-- **Failure is data:** a failed node returns `{ ok:false, error:{ category, ... } }`
-  — check it / `.filter(Boolean)` parallel results; don't assume success.
+- **Failure is data:** a node that exhausts retries returns
+  `{ ok:false, error:{ category, ... } }` — it does **not** throw, so it stays
+  truthy and `.filter(Boolean)` keeps it. Drop failed nodes with
+  `.filter(r => r && r.ok !== false)`. (Only a thunk that *throws* becomes `null`.)
 - **Bamboo is a coding agent:** great for file edits / commands. Its result is a
   prose *summary* of what it did, not raw content — so it is a poor fit for nodes
   whose value IS the answer: prose deliverables (reviews, analyses) and `schema:`

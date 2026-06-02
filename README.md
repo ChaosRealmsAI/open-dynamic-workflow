@@ -1,5 +1,9 @@
 # Open Dynamic Workflow
 
+[![CI](https://github.com/ChaosRealmsAI/open-dynamic-workflow/actions/workflows/ci.yml/badge.svg)](https://github.com/ChaosRealmsAI/open-dynamic-workflow/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-2024-orange.svg)](https://www.rust-lang.org/)
+
 **Open Dynamic Workflow (`odw`) is an open re-implementation of Claude Code's
 built-in Dynamic Workflow** — a script-driven runner for agent-authored
 JavaScript workflows, paired with a pluggable executor that runs each step on

@@ -390,6 +390,9 @@ fn doctor_report(
     // `pandacode` is the one executor odw actually requires. claude/codexctl are
     // PandaCode's concern (it owns the runtimes + their mechanics), so they are
     // reported for information but do not gate odw's own health.
+    // odw's script runtime runs on node; without it no workflow can execute, so
+    // it gates health alongside pandacode.
+    let node = run_version("node", &["--version"]);
     let pandacode = run_version(pandacode_bin, &["--version"]);
     let claude = run_version(claude_bin, &["--version"]);
     let codexctl = run_version(codexctl_bin, &["--help"]);
@@ -399,9 +402,10 @@ fn doctor_report(
     let project_odw = run_project_odw_status(&root);
     let pack = validate_pack_status(&root);
     Ok(json!({
-        "ok": pandacode.ok && project_odw.ok && pack.ok,
+        "ok": node.ok && pandacode.ok && project_odw.ok && pack.ok,
         "odw_version": ODW_VERSION,
         "project": root,
+        "node": node,
         "pandacode": pandacode,
         "runtimes": runtimes,
         "claude": claude,
@@ -415,6 +419,7 @@ fn doctor_report(
 }
 
 fn render_doctor_human(report: &serde_json::Value) -> String {
+    let node_ok = value_ok(&report["node"]);
     let pandacode_ok = value_ok(&report["pandacode"]);
     let codex_ok = value_ok(&report["codex"]);
     let claude_bin_ok = value_ok(&report["claude"]);
@@ -425,6 +430,7 @@ fn render_doctor_human(report: &serde_json::Value) -> String {
 
     let mut ready = Vec::new();
     let mut pending = Vec::new();
+    push_source(&mut ready, &mut pending, node_ok, "node");
     push_source(&mut ready, &mut pending, pandacode_ok, "pandacode");
     push_source(&mut ready, &mut pending, codex_ok, "codex");
     push_source(&mut ready, &mut pending, claude_ok, "claude");
@@ -442,6 +448,15 @@ fn render_doctor_human(report: &serde_json::Value) -> String {
         comma_list(&pending)
     ));
     lines.push(String::new());
+    lines.push(format!(
+        "{} node: {}",
+        icon(node_ok),
+        if node_ok {
+            format!("available ({})", value_summary(&report["node"]))
+        } else {
+            "not found - install Node.js (the odw script runtime needs it)".to_string()
+        }
+    ));
     lines.push(format!(
         "{} pandacode: {}",
         icon(pandacode_ok),

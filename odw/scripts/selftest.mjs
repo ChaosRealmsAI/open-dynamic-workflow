@@ -370,6 +370,25 @@ return {ok:true};`);
   assert(/PP \[10,null,30\]/.test(r.out), `pipeline error semantics wrong: ${r.out.slice(-300)}`);
 });
 
+test("pipeline: each stage gets (prevResult, originalItem, index) — built-in parity", () => {
+  // The built-in contract: later stages see the prior stage's result AND the
+  // ORIGINAL item + its index (so you can label work without threading context
+  // through stage 1's return). Lock that signature so a refactor can't break it.
+  const r = run(`export const meta={name:"ppsig"};
+phase("P","");
+const out = await pipeline(["A","B"],
+  (prev, item, index) => "s1:"+item+":"+index,
+  (prev, item, index) => prev+"|item="+item+"|idx="+index
+);
+log("SIG "+JSON.stringify(out));
+return {ok:true};`);
+  assert(r.code === 0, `pipeline rejected: ${r.out.slice(-300)}`);
+  assert(
+    /SIG \["s1:A:0\|item=A\|idx=0","s1:B:1\|item=B\|idx=1"\]/.test(r.out),
+    `stage signature wrong (expected (prev, originalItem, index)): ${r.out.slice(-300)}`
+  );
+});
+
 test("budget: remaining() is Infinity when no total set", () => {
   const r = run(`export const meta={name:"bi2"};
 log("REM="+budget.remaining());

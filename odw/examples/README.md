@@ -22,6 +22,7 @@ odw exec --script examples/01-single-node.js --backend pandacode --json
 | `03-pipeline-verify.js` | `pipeline` (no barrier) implement → verify, `schema` verdict, CI-gate exit |
 | `04-bamboo-provider.js` | Bamboo domestic-provider dispatch with `runtime:"bamboo"` and `pandacode.bamboo(...)` |
 | `05-heterogeneous-models.js` | fan one question across several different models in parallel (deepseek/qwen/kimi), reconcile with claude — ODW's heterogeneous-executor edge |
+| `06-build-project.js` | build a real project end-to-end: codex implements → claude reviews → codex fixes + runs the test command until green (the dogfood KV-store / roman-numeral shape) |
 
 Real `worktree` runs require `cwd` to be a git repository, and any spec/fixture
 the agent must read should be committed first (the worktree branches from HEAD).

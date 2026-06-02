@@ -1659,10 +1659,13 @@ async function runPandaCode(prompt, options) {
   }
   if (runtime === "codex") {
     args.push("--codexctl-bin", codexctlBin);
-    // Least privilege by default: codex runs sandboxed to the working directory
-    // (workspace-write) rather than --dangerously-full-access. Authors can opt a
-    // node up with { permission: "max" } when a task genuinely needs broader access.
-    const permission = options.permission === "max" ? "max" : "limited";
+    // Default to full access because a coding node usually must install
+    // dependencies (npm/pip/cargo) and reach the network, and the only narrower
+    // mode codexctl exposes — workspace-write — also BLOCKS network, which breaks
+    // real builds (verified: `npm install` fails with connect EPERM under it).
+    // Authors can opt a node down with { permission: "limited" } to confine it to
+    // the working dir with no network (good for reviewing/analysing code).
+    const permission = options.permission === "limited" ? "limited" : "max";
     args.push("--permission", permission);
   }
   const result = await runPandaCodeCommand(runtime, "exec", args, execCwd);

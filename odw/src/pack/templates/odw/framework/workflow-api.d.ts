@@ -65,9 +65,11 @@ export interface AgentOptions {
   sandbox?: string;
   approvalPolicy?: string;
   /**
-   * Codex permission mode. Defaults to "limited" (sandboxed to the working dir,
-   * workspace-write). Set "max" for --dangerously-full-access when a task
-   * genuinely needs access beyond the project directory. Codex runtime only.
+   * Codex permission mode. Defaults to "max" (full access) because a coding node
+   * usually needs the network and broad access to install dependencies and run
+   * tests. Set "limited" to confine the node to its working directory with NO
+   * network (workspace-write) — good for reviewing/analysing code, but it blocks
+   * dependency installs (npm/pip/cargo). Codex runtime only.
    */
   permission?: "limited" | "max";
   /**

@@ -7674,7 +7674,21 @@ fn resolve_writable_path(cwd: &Path, requested: &Path, create_dirs: bool) -> Res
         .parent()
         .ok_or_else(|| anyhow!("path has no parent: {}", candidate.display()))?;
     if create_dirs {
-        ensure_inside(&root, &candidate)?;
+        // The candidate does not exist yet, so it cannot be canonicalized. Resolve
+        // symlinks in the deepest ALREADY-EXISTING ancestor and bound that — a
+        // bare ensure_inside on the textual candidate would be fooled by a symlink
+        // inside the workspace that points outside it (write would escape cwd).
+        let mut existing = candidate.as_path();
+        while !existing.exists() {
+            match existing.parent() {
+                Some(p) => existing = p,
+                None => break,
+            }
+        }
+        let resolved_existing = existing
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize {}", existing.display()))?;
+        ensure_inside(&root, &resolved_existing)?;
         return Ok(candidate);
     }
 
@@ -10583,5 +10597,25 @@ mod tests {
     fn normalizes_success_status() {
         assert_eq!(normalize_finish_status("completed"), "success");
         assert_eq!(normalize_finish_status("needs input"), "blocked");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resolve_writable_path_blocks_symlink_escape_with_create_dirs() {
+        let base = std::env::temp_dir().join(format!("pandacode-wpath-{}", crate::io::now_millis()));
+        let cwd = base.join("cwd");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // a symlink inside cwd that points outside it
+        std::os::unix::fs::symlink(&outside, cwd.join("escape")).unwrap();
+        // writing a new file through the symlink (create_dirs) must be rejected
+        assert!(
+            resolve_writable_path(&cwd, Path::new("escape/pwned.txt"), true).is_err(),
+            "symlink escape through a to-be-created path must be blocked"
+        );
+        // a normal new path under cwd still resolves fine
+        assert!(resolve_writable_path(&cwd, Path::new("sub/ok.txt"), true).is_ok());
+        std::fs::remove_dir_all(&base).ok();
     }
 }

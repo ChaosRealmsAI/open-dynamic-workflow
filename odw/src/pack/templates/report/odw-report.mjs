@@ -165,7 +165,9 @@ for (const ev of events) {
     }
   } else if (t === "agent_done") {
     const n = nodes[ev.key];
-    if (n) { n.status = ev.ok === false ? "failed" : "ok"; if (typeof ev.tokens === "number") n.tokens = ev.tokens; n.durationMs = ms(startTs[ev.key], ev.ts); }
+    if (n) { n.status = ev.ok === false ? "failed" : "ok"; if (typeof ev.tokens === "number") n.tokens = ev.tokens; n.durationMs = ms(startTs[ev.key], ev.ts);
+      // Prefer the model the executor actually resolved over a code-declared "inherit".
+      if (ev.model && (!n.config.model || n.config.model === "inherit")) n.config = { ...n.config, model: ev.model }; }
   } else if (t === "agent_skip") {
     if (!nodes[ev.key]) { nodes[ev.key] = { id: ev.key, kind: "ai", label: ev.label || ev.key, stage: ev.phase || "", config: ev.config || {}, prompt: "", status: "skip", tokens: null, durationMs: null }; order.push(ev.key); const g = groups[groups.length - 1]; if (g) { link(g.forkId, ev.key); g.children.push(ev.key); } else { link(tail, ev.key); tail = ev.key; } }
     else nodes[ev.key].status = "skip";

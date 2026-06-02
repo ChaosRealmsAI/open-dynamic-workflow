@@ -717,6 +717,19 @@ return {ok:true};`);
   assert(/config \(from code\)/.test(html) && /"prompt":"alpha task"/.test(html), "report missing config/prompt UI parsed from code");
 });
 
+test("observability: a model the script left implicit is backfilled from the executor", () => {
+  const r = run(`export const meta={name:"rm2"};
+await agent("x",{label:"x", mockResolvedModel:"deepseek-v4-pro"});
+return {ok:true};`);
+  assert(r.code === 0, `run failed: ${r.out.slice(-200)}`);
+  const node = Object.values(r.state.agents || {})[0] || {};
+  assert(node.model === "deepseek-v4-pro", `model not backfilled in state: ${node.model}`);
+  assert(
+    r.events.some((e) => e.type === "agent_done" && e.model === "deepseek-v4-pro"),
+    "agent_done event missing the resolved model"
+  );
+});
+
 // ---- run all --------------------------------------------------------------
 let pass = 0;
 const failures = [];

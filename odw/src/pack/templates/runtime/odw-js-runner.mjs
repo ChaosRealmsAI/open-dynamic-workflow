@@ -222,6 +222,11 @@ globalThis.agent = async (prompt, options = {}) => {
         // lean {text, worktree} when a worktree captured changes) instead of the
         // verbose raw report. Schema'd nodes keep their validated object.
         const finalResult = schema ? result : leanAgentResult(result);
+        // Backfill the real model the executor resolved when the script left it
+        // implicit, so observability shows what ran instead of "inherit".
+        const resolvedModel = displayModel === "inherit"
+          ? (resolvedModelFromReport(rawResult) || displayModel)
+          : displayModel;
         state.agents[key] = {
           ok,
           index: agentIndex,
@@ -233,6 +238,7 @@ globalThis.agent = async (prompt, options = {}) => {
           attempt,
           maxAttempts,
           schema: schema?.name || null,
+          model: resolvedModel,
           result: finalResult,
           tokens: nodeTotalTokens(rawResult),
           ts: new Date().toISOString()
@@ -240,7 +246,7 @@ globalThis.agent = async (prompt, options = {}) => {
         delete state.activeAgents[key];
         delete state.failedAgents[key];
         saveState();
-        emit({ type: "agent_done", index: agentIndex, key, label, phase, agentType, runtime: displayRuntime, attempt, maxAttempts, ok, tokens: nodeTotalTokens(rawResult), result: finalResult });
+        emit({ type: "agent_done", index: agentIndex, key, label, phase, agentType, runtime: displayRuntime, model: resolvedModel, attempt, maxAttempts, ok, tokens: nodeTotalTokens(rawResult), result: finalResult });
         return finalResult;
       }
 
@@ -1340,6 +1346,11 @@ async function dispatchBackend(prompt, options) {
     if (Number.isFinite(mockTokens) && mockTokens > 0 && mockResult && typeof mockResult === "object" && !mockResult.codex) {
       mockResult.codex = { usage: { tokenUsage: { total: { totalTokens: mockTokens } } } };
     }
+    // Mock-only: stand in for an executor that resolved a concrete model the
+    // script left implicit, so the model-backfill (inherit -> real) is testable.
+    if (options.mockResolvedModel && mockResult && typeof mockResult === "object") {
+      mockResult.summary = { ...(mockResult.summary || {}), model: String(options.mockResolvedModel) };
+    }
     // Mock-only: write the requested file plus an executor-scratch file under
     // .pandacode/ so the worktree diff-capture + exclusion path is testable for free.
     if (options.mockWriteFile && options.execCwd) {
@@ -1496,6 +1507,28 @@ function nodeTotalTokens(result) {
   const pandaUsage = result?.execute?.summary?.usage || result?.summary?.usage;
   if (pandaUsage) {
     return usageTotalTokens(pandaUsage);
+  }
+  return null;
+}
+
+// When the script omits options.model, the executor still resolves a concrete
+// model (bamboo -> summary.model, claude -> model/summary.model, codex similar).
+// Recover it so the journal + HTML report show what actually ran, not "inherit".
+function resolvedModelFromReport(result) {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
+  const candidates = [
+    result.summary?.model,
+    result.model,
+    result.execute?.summary?.model,
+    result.codex?.model,
+    result.start?.model
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim() && candidate !== "inherit") {
+      return candidate.trim();
+    }
   }
   return null;
 }

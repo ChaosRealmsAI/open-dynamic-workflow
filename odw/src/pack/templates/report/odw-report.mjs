@@ -91,6 +91,9 @@ function showOverview(){
  h+='<div class="lab">run</div><div class="kv">'+
    row('backend',o.backend)+row('status',o.status,o.failed?'fail':'ok')+
    row('agent nodes',num(o.ai))+row('total tokens',num(o.tokens)+(o.approx?' (≥)':''))+'</div>';
+ if(o.modelTokens&&o.modelTokens.length){
+   h+='<div class="lab" style="margin-top:22px">tokens by model</div><div class="kv">'+
+     o.modelTokens.map(([m,t])=>row(m,num(t))).join('')+'</div>';}
  h+='<div class="lab" style="margin-top:22px">tip</div><div class="empty">Click any node to see its config and prompt as written in the workflow code.</div>';
  document.getElementById('detail').innerHTML=h;}
 function fitGraph(){const svg=document.querySelector('.graph svg'),g=document.querySelector('.graph');
@@ -185,7 +188,14 @@ const wfDone = events.find((e) => e.type === "workflow_done");
 const status = wfErr ? "failed" : (wfDone ? "ok" : "running");
 const backend = (wfStart && wfStart.backend) || state.backend || "?";
 const name = (wfStart && wfStart.name) || (state.workflow && state.workflow.name) || "workflow";
-const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: Boolean(wfErr) || aiNodes.some((n) => n.status === "failed"), ai: aiNodes.length, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx) };
+// Per-model token attribution — shows where a heterogeneous run spent its tokens.
+const byModel = {};
+for (const n of aiNodes) {
+  const key = (n.config && (n.config.model || n.config.runtime)) || "unknown";
+  byModel[key] = (byModel[key] || 0) + (n.tokens || 0);
+}
+const modelTokens = Object.entries(byModel).filter(([, t]) => t > 0).sort((a, b) => b[1] - a[1]);
+const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: Boolean(wfErr) || aiNodes.some((n) => n.status === "failed"), ai: aiNodes.length, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx), modelTokens };
 
 // ---- mermaid (uncoloured) -------------------------------------------------
 const safe = (id) => "n_" + String(id).replace(/[^a-zA-Z0-9_]/g, "_");

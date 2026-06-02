@@ -164,10 +164,13 @@ odw exec --script wf.js --backend pandacode --json
   to branch on structured fields.
 - **Failure is data:** a failed node returns `{ ok:false, error:{ category, ... } }`
   — check it / `.filter(Boolean)` parallel results; don't assume success.
-- **Bamboo is a coding agent:** great for file edits / commands. For a node whose
-  output is pure prose (a review, an analysis), pass a `schema:` (forces parseable
-  structured output) or use `runtime:"claude"` / `"codex"` — otherwise it can fail
-  with `missing JSON object in model response`.
+- **Bamboo is a coding agent:** great for file edits / commands. Its result is a
+  prose *summary* of what it did, not raw content — so it is a poor fit for nodes
+  whose value IS the answer: prose deliverables (reviews, analyses) and `schema:`
+  structured-output nodes both tend to fail (verified: a schema'd bamboo classify
+  node returned "...negative with score 0.95..." as prose and missed the schema 3x).
+  A schema does NOT fix this. Route answer-shaped nodes to `runtime:"claude"` /
+  `"codex"`; keep bamboo for the file/command work it's built for.
 - **Concurrency:** `parallel`/`pipeline` cap at `min(16, cores-2)`; a 1000-agent
   per-run backstop guards runaway loops.
 

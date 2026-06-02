@@ -352,11 +352,17 @@ provider names are `deepseek`, `xiaomi`, `kimi`, `zhipu`, `minimax`, `qwen`, and
 an authoring error.
 
 Bamboo is a **tool-using coding agent** — it shines at reading/writing files and
-running commands. For a node whose output is pure prose (a review, an analysis, a
-summary) it can occasionally fail with `missing JSON object in model response`
-when the model answers in text instead of a tool call. For prose-shaped nodes,
-pass a `schema:` (forces structured output) or route them to `runtime: "claude"`
-/ `"codex"`. See issue #5.
+running commands. Its node result is a prose *summary* of what it did, not raw
+content, so it is a poor fit for nodes whose value IS the answer:
+
+- **Prose deliverables** (a review, an analysis) can fail with `missing JSON
+  object in model response` when the agent answers in text instead of a tool call.
+- **`schema:` structured-output nodes** also tend to fail — a schema does **not**
+  fix it (verified: a schema'd bamboo classification returned its answer as prose
+  — "...negative with score 0.95..." — and missed the schema on every retry).
+
+Route answer-shaped nodes to `runtime: "claude"` / `"codex"`; keep bamboo for the
+file/command work it is built for. See issue #5.
 
 ## Built-in Workflow parity
 

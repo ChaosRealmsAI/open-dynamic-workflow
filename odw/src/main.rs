@@ -363,6 +363,7 @@ fn doctor(
     pandacode_bin: &str,
     json_output: bool,
 ) -> Result<()> {
+    let pandacode_bin = &resolved_pandacode_bin(pandacode_bin);
     let report = doctor_report(root, claude_bin, codexctl_bin, pandacode_bin)?;
     let ok = report
         .get("ok")
@@ -1413,7 +1414,7 @@ fn exec_script(args: ExecArgs) -> Result<()> {
             backend: args.backend,
             odw_bin: current_exe,
             codexctl_bin: args.codexctl_bin,
-            pandacode_bin: args.pandacode_bin,
+            pandacode_bin: resolved_pandacode_bin(&args.pandacode_bin),
             provider: args.provider,
             model: args.model,
             effort: args.effort,
@@ -1524,6 +1525,27 @@ fn write_report(run_dir: &Path, out_html: &Path, node_bin: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+// Resolve the pandacode executable. An explicit --pandacode-bin / ODW_PANDACODE_BIN
+// always wins. Otherwise, prefer a `pandacode` built next to this odw binary: the
+// Cargo workspace puts both in the same dir whether installed (`cargo install` ->
+// ~/.cargo/bin) or just built (`cargo build` -> target/<profile>/). This makes a
+// fresh `cargo build && ./target/release/odw …` work with no env vars; falls back
+// to a bare `pandacode` (PATH lookup) when no sibling is found.
+fn resolved_pandacode_bin(configured: &str) -> String {
+    if configured != "pandacode" {
+        return configured.to_string();
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let bin_name = if cfg!(windows) { "pandacode.exe" } else { "pandacode" };
+        if let Some(sibling) = exe.parent().map(|dir| dir.join(bin_name))
+            && sibling.is_file()
+        {
+            return sibling.to_string_lossy().into_owned();
+        }
+    }
+    configured.to_string()
 }
 
 fn open_path(path: &Path) {

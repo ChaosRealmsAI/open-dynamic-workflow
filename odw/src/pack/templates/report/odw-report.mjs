@@ -181,7 +181,11 @@ link(tail, endId);
 
 // ---- totals + overview ----------------------------------------------------
 const aiNodes = order.map((id) => nodes[id]).filter((n) => n.kind === "ai");
-const totalTokens = (state.budget && typeof state.budget.spent === "number") ? state.budget.spent : aiNodes.reduce((s, n) => s + (n.tokens || 0), 0);
+// Sum of per-node (final-attempt) tokens. The budget meter may be higher when
+// nodes retried (every attempt accrues); prefer it as the headline total, and
+// reconcile the gap in the per-model breakdown below so the numbers add up.
+const nodeTokenSum = aiNodes.reduce((s, n) => s + (n.tokens || 0), 0);
+const totalTokens = (state.budget && typeof state.budget.spent === "number") ? state.budget.spent : nodeTokenSum;
 const wfStart = events.find((e) => e.type === "workflow_start");
 const wfErr = events.find((e) => e.type === "workflow_error");
 const wfDone = events.find((e) => e.type === "workflow_done");
@@ -195,6 +199,11 @@ for (const n of aiNodes) {
   byModel[key] = (byModel[key] || 0) + (n.tokens || 0);
 }
 const modelTokens = Object.entries(byModel).filter(([, t]) => t > 0).sort((a, b) => b[1] - a[1]);
+// Reconcile to the displayed total: tokens the budget meter counted that no final
+// node carries (retried attempts) surface as one explicit line, so the breakdown
+// always adds up to "total tokens" instead of silently falling short.
+const attributed = modelTokens.reduce((s, [, t]) => s + t, 0);
+if (totalTokens > attributed) modelTokens.push(["other (retries/overhead)", totalTokens - attributed]);
 const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: Boolean(wfErr) || aiNodes.some((n) => n.status === "failed"), ai: aiNodes.length, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx), modelTokens };
 
 // ---- mermaid (uncoloured) -------------------------------------------------

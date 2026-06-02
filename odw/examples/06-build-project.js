@@ -25,21 +25,26 @@ export const meta = {
 const SPEC = (args && args.spec) || "a small command-line tool, your choice, with unit tests";
 const TEST = (args && args.test) || "echo 'set args.test to your test command'";
 
+// A no-schema node returns the final text on a real run, but a token-free mock
+// dry-run returns a metadata object — coerce both to a readable string so dry-run
+// output never prints "[object Object]".
+const asText = (r) => (typeof r === "string" ? r : (r && r.text) || JSON.stringify(r));
+
 phase("Implement");
-const impl = String(await agent(
+const impl = asText(await agent(
   `In the CURRENT directory, implement: ${SPEC}.
 Write real, runnable code plus unit tests. Keep dependencies minimal. Make the tests pass with: ${TEST}`,
   { label: "implement (codex)", runtime: "codex" }
 ));
 
 phase("Review");
-const review = String(await agent(
+const review = asText(await agent(
   `Review the code just written in this directory for correctness bugs and missing edge cases. List concrete issues with file:line. Do NOT edit files.`,
   { label: "review (claude)", runtime: "claude" }
 ));
 
 phase("Verify");
-const verify = String(await agent(
+const verify = asText(await agent(
   `Apply the fixes from this review, then run \`${TEST}\` in this directory and report exact pass/fail counts. Iterate until green or blocked.\n\nReview:\n${review.slice(0, 1500)}`,
   { label: "fix+verify (codex)", runtime: "codex" }
 ));

@@ -24,6 +24,11 @@ const QUESTION =
   (args && args.question) ||
   "What is the single biggest risk in a distributed rate limiter, and the simplest mitigation?";
 
+// A no-schema node returns the final text on a real run, but a token-free mock
+// dry-run returns a metadata object — coerce both to a readable string so dry-run
+// output never prints "[object Object]".
+const asText = (r) => (typeof r === "string" ? r : (r && r.text) || JSON.stringify(r));
+
 const PANEL = [
   { provider: "deepseek", model: M.deepseek },
   { provider: "qwen", model: M.qwen },
@@ -39,7 +44,7 @@ const answers = await parallel(
       runtime: "bamboo",
       provider: p.provider,
       model: p.model,
-    }).then((text) => ({ provider: p.provider, text: String(text) }))
+    }).then((text) => ({ provider: p.provider, text: asText(text) }))
   )
 );
 
@@ -48,7 +53,7 @@ const brief = answers
   .filter((a) => a && a.text)
   .map((a) => `[${a.provider}] ${a.text.slice(0, 400)}`)
   .join("\n\n");
-const consensus = String(
+const consensus = asText(
   await agent(
     `Three models answered the same question. Reconcile them into one best answer and note any disagreement.\n\n${brief}`,
     { label: "synthesize", phase: "Synthesize", runtime: "claude" }

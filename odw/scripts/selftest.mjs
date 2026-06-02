@@ -204,6 +204,21 @@ return {ok:true};`);
   assert(odwWorktreeLeftovers().length === 0, `dir not removed after capture:\n${odwWorktreeLeftovers().join("\n")}`);
 });
 
+test("worktree: unchanged EXECUTOR node keeps {text, worktree:{changed:false}} (consistent shape)", () => {
+  // Real executor reports collapse through leanAgentResult; an unchanged worktree
+  // node must keep its worktree object instead of decaying to a bare string, so
+  // worktree nodes always expose `result.worktree.changed`. mockAgentText makes
+  // the mock return an executor-report envelope, exercising that path token-free.
+  const r = run(`export const meta={name:"wue"};
+phase("P","");
+const a = await agent("noop", { id:"wue", label:"wue", isolation:"worktree", mockAgentText:"did nothing" });
+log("WUE type="+typeof a+" changed="+(a&&a.worktree&&a.worktree.changed)+" text="+(a&&a.text));
+return {ok:true};`);
+  assert(r.code === 0, `run failed: ${r.out.slice(-300)}`);
+  assert(/WUE type=object changed=false text=did nothing/.test(r.out),
+    `unchanged executor worktree node must keep its worktree object: ${r.out.slice(-300)}`);
+});
+
 // 4. Budget accounting ------------------------------------------------------
 test("budget: accrual + remaining + hard ceiling", () => {
   const r = run(`export const meta={name:"b"};

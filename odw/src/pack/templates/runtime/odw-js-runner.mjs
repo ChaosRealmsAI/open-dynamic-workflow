@@ -926,7 +926,12 @@ function leanAgentResult(result) {
   }
   const text = stripCompletionMarker(finalAgentText(result));
   const worktree = result.worktree;
-  if (worktree && typeof worktree === "object" && worktree.changed) {
+  // If the node ran in a worktree, always return {text, worktree} — even when it
+  // made no changes — so worktree nodes have a consistent shape and a caller can
+  // reliably check `result.worktree.changed`. Previously an unchanged worktree
+  // node collapsed to a bare string (worktree dropped), so `result.worktree` was
+  // undefined and indistinguishable from a non-worktree node.
+  if (worktree && typeof worktree === "object") {
     return { text, worktree };
   }
   return text;

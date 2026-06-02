@@ -144,11 +144,14 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
             .get("pending_user_input")
             .cloned()
             .unwrap_or(Value::Null);
-        let output_tail = wait.get("output_tail").cloned().unwrap_or(Value::Null);
-        let last_agent_message = wait
-            .get("last_agent_message")
-            .cloned()
-            .unwrap_or(Value::Null);
+        let output_tail = strip_completion_marker(
+            wait.get("output_tail").cloned().unwrap_or(Value::Null),
+            &marker,
+        );
+        let last_agent_message = strip_completion_marker(
+            wait.get("last_agent_message").cloned().unwrap_or(Value::Null),
+            &marker,
+        );
         Ok(json!({
             "ok": wait["ok"],
             "state": wait["status"],
@@ -252,11 +255,14 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         .get("pending_user_input")
         .cloned()
         .unwrap_or(Value::Null);
-    let output_tail = wait.get("output_tail").cloned().unwrap_or(Value::Null);
-    let last_agent_message = wait
-        .get("last_agent_message")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let output_tail = strip_completion_marker(
+        wait.get("output_tail").cloned().unwrap_or(Value::Null),
+        &marker,
+    );
+    let last_agent_message = strip_completion_marker(
+        wait.get("last_agent_message").cloned().unwrap_or(Value::Null),
+        &marker,
+    );
     let report = json!({
         "ok": wait["ok"],
         "state": wait["status"],
@@ -870,6 +876,16 @@ fn with_completion_marker(task: &str, marker: &str) -> String {
     )
 }
 
+// The agent is told to end with the completion marker; remove it (and any
+// resulting trailing blank lines) so the captured reply stays clean instead of
+// leaking "PANDACODE_DONE_<ts>_<pid>" to callers.
+fn strip_completion_marker(value: Value, marker: &str) -> Value {
+    match value {
+        Value::String(text) => Value::String(text.replace(marker, "").trim_end().to_string()),
+        other => other,
+    }
+}
+
 fn wait_for_turn_completion(
     tmux_bin: &str,
     session: &str,
@@ -1412,5 +1428,22 @@ mod tests {
         assert!(pending_user_input_from_events(&newer_events).is_none());
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn strip_completion_marker_removes_sentinel_and_trailing_blanks() {
+        let marker = "PANDACODE_DONE_123_456";
+        let msg = Value::String(format!("Hi! How can I help you today?\n\n{marker}"));
+        assert_eq!(
+            strip_completion_marker(msg, marker),
+            Value::String("Hi! How can I help you today?".to_string())
+        );
+        // Non-string values pass through untouched.
+        assert_eq!(strip_completion_marker(Value::Null, marker), Value::Null);
+        // A reply that never echoed the marker is unchanged.
+        assert_eq!(
+            strip_completion_marker(Value::String("done".into()), marker),
+            Value::String("done".into())
+        );
     }
 }

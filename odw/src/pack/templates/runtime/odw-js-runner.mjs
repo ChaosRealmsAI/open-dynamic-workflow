@@ -914,7 +914,7 @@ function leanAgentResult(result) {
   if (!isExecutorReport(result)) {
     return result;
   }
-  const text = finalAgentText(result);
+  const text = stripCompletionMarker(finalAgentText(result));
   const worktree = result.worktree;
   if (worktree && typeof worktree === "object" && worktree.changed) {
     return { text, worktree };
@@ -2065,6 +2065,15 @@ function pruneEmpty(value) {
   return pruned;
 }
 
+// pandacode's claude/tmux runtime asks the agent to end its turn with a
+// PANDACODE_DONE_<ms>_<pid> completion marker. The agent echoes it into its
+// reply, and it reaches us via several capture paths (summary fields, the
+// terminal tail, the hook event log). Strip the marker pattern from whatever we
+// surface so it never leaks into the value a workflow node returns.
+function stripCompletionMarker(text) {
+  return String(text || "").replace(/\s*PANDACODE_DONE_\d+_\d+/g, "").trimEnd();
+}
+
 function readPandaCodeLastAssistantMessage(report) {
   const direct = firstText(
     report?.last_agent_message,
@@ -2076,7 +2085,7 @@ function readPandaCodeLastAssistantMessage(report) {
     report?.summary?.summary
   );
   if (direct) {
-    return direct;
+    return stripCompletionMarker(direct);
   }
   const eventLog = firstText(
     report?.record?.artifacts?.event_log,
@@ -2112,7 +2121,7 @@ function readPandaCodeLastAssistantMessage(report) {
       event?.lastAssistantMessage
     );
     if (message) {
-      return message;
+      return stripCompletionMarker(message);
     }
   }
   return "";

@@ -730,6 +730,16 @@ return {ok:true};`);
   );
 });
 
+test("observability: claude completion marker never leaks into a node's returned text", () => {
+  const r = run(`export const meta={name:"mk"};
+const t = await agent("x",{label:"x", mockAgentText:"All good here\\nPANDACODE_DONE_1780000000000_4242"});
+log("GOT["+t+"]");
+return {ok:true};`);
+  assert(r.code === 0, `run failed: ${r.out.slice(-200)}`);
+  assert(/GOT\[All good here\]/.test(r.out), `marker not stripped: ${(r.out.match(/GOT\[[^\]]*\]/) || [])[0]}`);
+  assert(!/PANDACODE_DONE/.test(r.out), "PANDACODE_DONE marker leaked into the node result");
+});
+
 // ---- run all --------------------------------------------------------------
 let pass = 0;
 const failures = [];

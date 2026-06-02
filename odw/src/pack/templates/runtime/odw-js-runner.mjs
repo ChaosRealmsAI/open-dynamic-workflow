@@ -534,10 +534,10 @@ function validateAgainstSchema(value, schema, path, issues) {
     // Do NOT return: JSON Schema applies oneOf AND any sibling keywords (type,
     // required, properties, …). Falling through checks those too.
   }
-  if (schema.const !== undefined && JSON.stringify(value) !== JSON.stringify(schema.const)) {
+  if (schema.const !== undefined && stableStringify(value) !== stableStringify(schema.const)) {
     issues.push(`${path} must equal ${JSON.stringify(schema.const)}`);
   }
-  if (Array.isArray(schema.enum) && !schema.enum.some((item) => JSON.stringify(item) === JSON.stringify(value))) {
+  if (Array.isArray(schema.enum) && !schema.enum.some((item) => stableStringify(item) === stableStringify(value))) {
     issues.push(`${path} must be one of ${schema.enum.map((item) => JSON.stringify(item)).join(", ")}`);
   }
   if (schema.type !== undefined && !schemaTypeMatches(value, schema.type)) {

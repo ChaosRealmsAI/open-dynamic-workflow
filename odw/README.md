@@ -344,6 +344,13 @@ provider names are `deepseek`, `xiaomi`, `kimi`, `zhipu`, `minimax`, `qwen`, and
 `stepfun`. Passing `provider` with `runtime: "claude"` or `runtime: "codex"` is
 an authoring error.
 
+Bamboo is a **tool-using coding agent** — it shines at reading/writing files and
+running commands. For a node whose output is pure prose (a review, an analysis, a
+summary) it can occasionally fail with `missing JSON object in model response`
+when the model answers in text instead of a tool call. For prose-shaped nodes,
+pass a `schema:` (forces structured output) or route them to `runtime: "claude"`
+/ `"codex"`. See issue #5.
+
 ## Built-in Workflow parity
 
 ODW's script runtime matches the Claude Code built-in Workflow tool on these
@@ -392,6 +399,24 @@ These behaviors are self-verified: `node scripts/selftest.mjs` runs `odw` agains
 crafted mock workflows and asserts every parity feature (token-free,
 deterministic). It is wired into `cargo test` as the `parity_selftest`
 integration test, so the gate fails if any parity behavior regresses.
+
+### Where ODW goes further
+
+- **Heterogeneous executors.** Each node picks its own runtime/provider/model, so
+  one `parallel(...)` can fan a task across codex + claude + several domestic
+  models at once — the built-in tool runs claude subagents only.
+- **Persistent, offline observability.** Every run writes `events.jsonl` and a
+  standalone HTML execution graph: per-node runtime, the *resolved* model (even
+  when the script left it implicit), real token count, prompt, status, and
+  duration. The built-in tool's progress tree is ephemeral.
+- **Structured failures, not exceptions.** A node that exhausts its retries
+  returns `{ ok: false, error: { category, message } }` instead of throwing, so a
+  script can inspect *why* a node failed (`result.ok === false`,
+  `result.error.category`). A thunk that *throws* still resolves to `null` inside
+  `parallel`/`pipeline`, matching the built-in `.filter(Boolean)` idiom — so use
+  `.filter(r => r && r.ok !== false)` when you want to drop failed nodes too.
+- **claude token accounting.** claude nodes report token usage (parsed from the
+  Claude Code session transcript), so `budget` counts them like codex/bamboo.
 
 ## Status
 

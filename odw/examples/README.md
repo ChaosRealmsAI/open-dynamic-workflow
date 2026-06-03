@@ -37,6 +37,8 @@ task prompts as owner intent, repairs blocker-matched tasks up to
 cannot be mapped to task files, stops for `needs_owner`, and treats final
 verification as read-only: any post-approval file mutation fails the run and is
 restored from the pre-verification snapshot.
+Each task must declare a stable unique `id`; ODW uses task ids for node keys,
+sessions, repair history, and reports.
 Before review, it also blocks failed implementation nodes and cross-owned file
 edits. Declare one `task.file` or multiple `task.files` for each task; set
 `strictTaskFileBoundaries:false` only with explicit owner intent.

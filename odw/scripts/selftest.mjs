@@ -1424,6 +1424,44 @@ test("examples: parallel-review-apply blocks duplicate task file ownership befor
   }
 });
 
+test("examples: parallel-review-apply blocks missing or duplicate task ids before worktrees", () => {
+  const { dir } = makeGitRepo("odw-example-07-invalid-task-ids-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const duplicateInput = {
+      test: "node -e \"console.log('duplicate id guard')\"",
+      tasks: [
+        { id: "api", file: "src/api.js", prompt: "Create src/api.js." },
+        { id: "api", file: "test/api.test.js", prompt: "Create test/api.test.js." }
+      ]
+    };
+    const duplicate = run(null, { cwd: dir, scriptPath, input: duplicateInput });
+    assert(duplicate.code !== 0, "starter should fail before worktrees when task ids are duplicated");
+    const duplicateResult = duplicate.state.result;
+    assert(duplicateResult?.error?.category === "invalid_task_ids", `wrong duplicate-id error: ${JSON.stringify(duplicateResult?.error)}`);
+    assert(duplicateResult?.duplicateTaskIds?.[0]?.id === "api", `duplicate id not reported: ${JSON.stringify(duplicateResult)}`);
+    assert(duplicateResult?.duplicateTaskIds?.[0]?.owners?.map((item) => item.file).join("|") === "src/api.js|test/api.test.js", `duplicate id owners not reported: ${JSON.stringify(duplicateResult)}`);
+    assert(ev(duplicate.events, "worktree_start").length === 0, "duplicate id guard should not create implementation worktrees");
+
+    const missingInput = {
+      test: "node -e \"console.log('missing id guard')\"",
+      tasks: [
+        { id: "ok", file: "src/ok.js", prompt: "Create src/ok.js." },
+        { file: "docs/missing-id.md", prompt: "Create docs/missing-id.md." }
+      ]
+    };
+    const missing = run(null, { cwd: dir, scriptPath, input: missingInput });
+    assert(missing.code !== 0, "starter should fail before worktrees when a task id is missing");
+    const missingResult = missing.state.result;
+    assert(missingResult?.error?.category === "invalid_task_ids", `wrong missing-id error: ${JSON.stringify(missingResult?.error)}`);
+    assert(missingResult?.missingTaskIds?.[0]?.index === 1, `missing id index not reported: ${JSON.stringify(missingResult)}`);
+    assert(missingResult?.missingTaskIds?.[0]?.file === "docs/missing-id.md", `missing id file not reported: ${JSON.stringify(missingResult)}`);
+    assert(ev(missing.events, "worktree_start").length === 0, "missing id guard should not create implementation worktrees");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply fails if final verification mutates cwd", () => {
   const { dir } = makeGitRepo("odw-example-07-verify-guard-");
   try {
@@ -1459,6 +1497,7 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
   assert(/owner-provided product intent/.test(starter.out), "starter output missing owner-intent review policy");
   assert(/history/.test(starter.out) && /repair_plan/.test(starter.out), "starter output missing review/repair history");
   assert(/pre_review_block/.test(starter.out) && /strictTaskFileBoundaries/.test(starter.out), "starter output missing pre-review implementation gate");
+  assert(/invalid_task_ids/.test(starter.out) && /stable unique id/.test(starter.out), "starter output missing task id guard");
   assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
   assert(/duplicate_task_files/.test(starter.out) && /allowDuplicateTaskFiles/.test(starter.out), "starter output missing duplicate task-file guard");
   assert(/captureMainWorktreeSnapshot/.test(starter.out) && /permission: "limited"/.test(starter.out), "starter output missing read-only final verification guard");

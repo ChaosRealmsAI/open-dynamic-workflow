@@ -52,6 +52,45 @@ export default async function workflow() {
   const strictTaskFileBoundaries = args?.strictTaskFileBoundaries !== false;
   const allowDirtyTaskFiles = args?.allowDirtyTaskFiles === true;
   const allowDuplicateTaskFiles = args?.allowDuplicateTaskFiles === true;
+
+  const taskIdEntries = TASKS.map((task, index) => ({
+    index,
+    id: String(task?.id ?? "").trim(),
+    file: task?.file || null,
+  }));
+  const missingTaskIds = taskIdEntries
+    .filter((entry) => !entry.id)
+    .map((entry) => ({
+      index: entry.index,
+      file: entry.file,
+    }));
+  const taskIdOwners = new Map();
+  for (const entry of taskIdEntries) {
+    if (!entry.id) {
+      continue;
+    }
+    const owners = taskIdOwners.get(entry.id) || [];
+    owners.push({ index: entry.index, file: entry.file });
+    taskIdOwners.set(entry.id, owners);
+  }
+  const duplicateTaskIds = [...taskIdOwners.entries()]
+    .filter(([, owners]) => owners.length > 1)
+    .map(([id, owners]) => ({ id, owners }));
+  if (missingTaskIds.length > 0 || duplicateTaskIds.length > 0) {
+    return {
+      ok: false,
+      error: {
+        category: "invalid_task_ids",
+        message:
+          "Every parallel task must declare a stable unique id before worktrees can be created.",
+      },
+      missingTaskIds,
+      duplicateTaskIds,
+      hint:
+        "Assign each task a short unique id. ODW uses task ids for node keys, sessions, repair history, and reports.",
+    };
+  }
+
   const taskBrief = TASKS.map(
     (task) => `- ${task.id}: ${task.file || "(files from prompt)"} — ${task.prompt}`
   ).join("\n");

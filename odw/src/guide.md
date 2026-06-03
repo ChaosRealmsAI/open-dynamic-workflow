@@ -157,6 +157,8 @@ odw exec --script wf.js --backend pandacode --json
   of landing on `needs_owner`. Final verification is guarded by a main-worktree
   snapshot; if the verifier modifies files after approval, the run restores
   those unapproved changes and fails instead of silently bypassing review.
+  Every task must declare a stable unique `id`; ODW uses it for node keys,
+  sessions, repair history, and reports.
   By default each task is expected to stay inside `task.file` / `task.files`;
   failed implementation nodes or cross-owned file edits are repaired before any
   review/apply gate runs. Set `strictTaskFileBoundaries:false` only when the

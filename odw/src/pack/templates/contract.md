@@ -19,6 +19,8 @@ possible, lands only `approve` gates atomically, and then verifies the main
 working directory under a read-only snapshot guard. If final verification
 modifies files after approval, the run restores those unapproved changes and
 fails instead of bypassing review.
+Each task must declare a stable unique `id`; ODW uses task ids for node keys,
+sessions, repair history, and reports.
 Before review, it blocks failed implementation nodes and cross-owned file edits.
 Use `task.file` or `task.files` to declare each task's ownership; set
 `strictTaskFileBoundaries:false` only with explicit owner intent.

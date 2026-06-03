@@ -13,20 +13,23 @@ use serde_json::json;
 mod pack;
 
 const ODW_VERSION: &str = env!("CARGO_PKG_VERSION");
-const ODW_PROJECT_BIN_PATH: &str = ".odw/bin/odw";
 #[derive(Debug, Parser)]
 #[command(
     name = "odw",
     version,
-    about = "Open Dynamic Workflow: run agent-authored JavaScript workflows; each agent() node is dispatched to PandaCode (codex/claude/bamboo). Start with `odw exec --script <wf.js> --backend mock`.",
+    about = "Open Dynamic Workflow: run agent-authored JavaScript workflows; each agent() node is dispatched to PandaCode (codex/claude/bamboo). Zero install — run `odw guide` for the full usage guide, then `odw exec --script <wf.js> --backend mock`.",
     long_about = "Open Dynamic Workflow (odw) runs a JavaScript workflow you write \
 (agent / parallel / pipeline / budget / worktree) and dispatches every executor \
-node to PandaCode. The CLI is the single entrypoint:\n\n  \
-odw init --path .                 # scaffold the pack + agent skill\n  \
-odw doctor                       # check pandacode + pack health\n  \
+node to PandaCode. Zero install — the CLI is self-documenting, so any agent can \
+use it straight from `--help`:\n\n  \
+odw guide                        # full self-contained authoring + run guide (read this first)\n  \
+odw doctor                       # check pandacode + runtimes are wired up\n  \
 odw exec --script wf.js --backend mock --json    # token-free dry run\n  \
-odw exec --script wf.js --backend pandacode      # real run\n\n\
-After `odw init`, read .claude/skills/odw/SKILL.md for the full authoring guide."
+odw exec --script wf.js --backend pandacode      # real run\n  \
+odw report --script wf.js --open                 # HTML execution-graph preview\n  \
+odw runs show latest                             # inspect a run's journal\n  \
+odw spec | odw contract | odw capabilities       # machine-readable API + contract\n\n\
+Start with `odw guide`. Everything an agent needs is in the CLI — nothing to scaffold."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -35,19 +38,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    #[command(about = "Install Open Dynamic Workflow into a project .claude directory")]
-    Init {
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-        #[arg(
-            long,
-            help = "Overwrite existing generated Open Dynamic Workflow files"
-        )]
-        force: bool,
-        #[arg(long, help = "Print planned writes without changing files")]
-        dry_run: bool,
-    },
-    #[command(about = "Check the pandacode executor, runtimes, and pack health")]
+    #[command(about = "Check the pandacode executor and runtimes are wired up")]
     Doctor {
         #[arg(long, default_value = ".")]
         path: PathBuf,
@@ -60,25 +51,14 @@ enum Commands {
         #[arg(long, help = "Print the full machine-readable doctor report")]
         json: bool,
     },
-    #[command(subcommand, about = "List installed or built-in agent types")]
-    Agents(AgentsCommand),
-    #[command(subcommand, about = "List or remove ODW workflow commands/templates")]
-    Workflows(WorkflowsCommand),
-    #[command(subcommand, about = "Inspect workflow graph entrypoints")]
-    Graphs(GraphsCommand),
-    #[command(about = "Validate a project's Open Dynamic Workflow files")]
-    Validate {
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
-    #[command(about = "Print the workflow authoring contract for this pack")]
+    #[command(about = "Print the full workflow authoring contract")]
     Contract,
     #[command(about = "Print machine-readable Open Dynamic Workflow capability mapping")]
     Capabilities,
     #[command(about = "Print the Open Dynamic Workflow framework spec")]
     Spec,
-    #[command(about = "List Claude Code Dynamic Workflow evidence for this project")]
-    Evidence(EvidenceArgs),
+    #[command(about = "Print the self-contained agent usage guide (what odw is, how to author + run)")]
+    Guide,
     #[command(subcommand, about = "Inspect ODW run journals and live logs")]
     Runs(RunsCommand),
     #[command(about = "Execute an ODW JavaScript workflow script directly")]
@@ -88,21 +68,6 @@ enum Commands {
         long_about = "Mock-run a workflow script (or take an existing run) and render a self-contained HTML report: a Mermaid execution graph coloured by runtime, plus each node's model, prompt, status, tokens, and duration.\n\n  odw report --script wf.js --open       # write JS -> mock dry-run -> graph -> open\n  odw report --run latest --open         # graph an existing (real or mock) run"
     )]
     Report(ReportArgs),
-}
-
-#[derive(Debug, clap::Args)]
-struct EvidenceArgs {
-    #[arg(long, default_value = ".")]
-    path: PathBuf,
-    #[arg(
-        long,
-        help = "Override Claude projects directory; defaults to ~/.claude/projects"
-    )]
-    claude_projects_dir: Option<PathBuf>,
-    #[arg(long, help = "Filter to one Claude Code session directory")]
-    session_id: Option<String>,
-    #[arg(long, help = "Filter to one workflow runId")]
-    run_id: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -163,47 +128,10 @@ enum RunsCommand {
     },
 }
 
-#[derive(Debug, Subcommand)]
-enum AgentsCommand {
-    List {
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-        #[arg(long, help = "Show built-in agent types instead of installed files")]
-        built_in: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum WorkflowsCommand {
-    List {
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
-    Remove {
-        name: String,
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-        #[arg(long, help = "Print files that would be removed")]
-        dry_run: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum GraphsCommand {
-    List {
-        #[arg(long, default_value = ".")]
-        path: PathBuf,
-    },
-}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Init {
-            path,
-            force,
-            dry_run,
-        } => init(&path, force, dry_run),
         Commands::Doctor {
             path,
             claude_bin,
@@ -211,21 +139,6 @@ fn main() -> Result<()> {
             pandacode_bin,
             json,
         } => doctor(&path, &claude_bin, &codexctl_bin, &pandacode_bin, json),
-        Commands::Agents(command) => match command {
-            AgentsCommand::List { path, built_in } => list_agents(&path, built_in),
-        },
-        Commands::Workflows(command) => match command {
-            WorkflowsCommand::List { path } => list_workflows(&path),
-            WorkflowsCommand::Remove {
-                name,
-                path,
-                dry_run,
-            } => remove_workflow(&path, &name, dry_run),
-        },
-        Commands::Graphs(command) => match command {
-            GraphsCommand::List { path } => graphs_list(&path),
-        },
-        Commands::Validate { path } => validate(&path),
         Commands::Contract => {
             println!("{}", contract_text());
             Ok(())
@@ -238,7 +151,10 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&framework_spec_json())?);
             Ok(())
         }
-        Commands::Evidence(args) => evidence(args),
+        Commands::Guide => {
+            print!("{}", include_str!("guide.md"));
+            Ok(())
+        }
         Commands::Runs(command) => match command {
             RunsCommand::List { path } => runs_list(&path),
             RunsCommand::Show { run_id, path, tail } => runs_show(&path, &run_id, tail),
@@ -246,118 +162,6 @@ fn main() -> Result<()> {
         Commands::Exec(args) => exec_script(*args),
         Commands::Report(args) => report(args),
     }
-}
-
-fn init(root: &Path, force: bool, dry_run: bool) -> Result<()> {
-    let actions = init_actions(root, force, dry_run)?;
-    for action in actions {
-        println!("{action}");
-    }
-    if !dry_run {
-        println!(
-            "\nOpen Dynamic Workflow installed. Run `odw exec --script <workflow.js> --input <json>`; Claude Code `/odw` remains available as an optional entrypoint."
-        );
-    }
-    Ok(())
-}
-
-fn init_actions(root: &Path, force: bool, dry_run: bool) -> Result<Vec<String>> {
-    let root = normalize_root(root)?;
-    let files = pack_files();
-    for file in files {
-        let target = root.join(file.path);
-        if target.exists() && !force {
-            bail!(
-                "{} already exists; rerun with --force to overwrite generated Open Dynamic Workflow files",
-                target.display()
-            );
-        }
-    }
-    let shim_target = root.join(ODW_PROJECT_BIN_PATH);
-    if shim_target.exists() && !force {
-        bail!(
-            "{} already exists; rerun with --force to overwrite generated Open Dynamic Workflow files",
-            shim_target.display()
-        );
-    }
-    let mut actions = Vec::new();
-    for file in files {
-        let target = root.join(file.path);
-        if dry_run {
-            actions.push(format!("write {}", target.display()));
-            continue;
-        }
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        fs::write(&target, file.content).with_context(|| format!("write {}", target.display()))?;
-        actions.push(format!("wrote {}", target.display()));
-    }
-    if dry_run {
-        actions.push(format!("write {}", shim_target.display()));
-    } else {
-        if let Some(parent) = shim_target.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        fs::write(&shim_target, project_odw_shim_content())
-            .with_context(|| format!("write {}", shim_target.display()))?;
-        make_executable(&shim_target)?;
-        actions.push(format!("wrote {}", shim_target.display()));
-    }
-    Ok(actions)
-}
-
-fn project_odw_shim_content() -> String {
-    let bootstrap = std::env::current_exe()
-        .ok()
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|| "odw".to_string());
-    format!(
-        r#"#!/usr/bin/env sh
-set -eu
-
-if [ "${{ODW_BIN:-}}" != "" ] && [ -x "${{ODW_BIN}}" ]; then
-  exec "${{ODW_BIN}}" "$@"
-fi
-
-bootstrap={}
-if [ -x "$bootstrap" ]; then
-  exec "$bootstrap" "$@"
-fi
-
-candidate="$(command -v odw 2>/dev/null || true)"
-if [ "$candidate" != "" ]; then
-  self_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-  candidate_dir="$(CDPATH= cd -- "$(dirname -- "$candidate")" 2>/dev/null && pwd || true)"
-  candidate_name="$(basename -- "$candidate")"
-  if [ "$candidate_dir/$candidate_name" != "$self_dir/odw" ]; then
-    exec "$candidate" "$@"
-  fi
-fi
-
-echo "ODW project wrapper could not find an executable odw binary. Set ODW_BIN or install odw on PATH." >&2
-exit 127
-"#,
-        shell_quote(&bootstrap)
-    )
-}
-
-#[cfg(unix)]
-fn make_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let mut permissions = fs::metadata(path)
-        .with_context(|| format!("read permissions {}", path.display()))?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)
-        .with_context(|| format!("set executable bit {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 fn doctor(
@@ -403,10 +207,8 @@ fn doctor_report(
     let codex = run_codex_status(codexctl_bin);
     let bamboo_keys = bamboo_key_report();
     let runtimes = run_pandacode_doctor_report(pandacode_bin, &root);
-    let project_odw = run_project_odw_status(&root);
-    let pack = validate_pack_status(&root);
     Ok(json!({
-        "ok": node.ok && pandacode.ok && project_odw.ok && pack.ok,
+        "ok": node.ok && pandacode.ok,
         "odw_version": ODW_VERSION,
         "project": root,
         "node": node,
@@ -416,9 +218,7 @@ fn doctor_report(
         "codexctl": codexctl,
         "codex": codex,
         "bamboo_keys": bamboo_keys,
-        "project_odw": project_odw,
-        "pack": pack,
-        "decision": "odw dispatches each node to `pandacode <runtime> exec`; it requires only the pandacode binary. PandaCode owns the codex/claude/bamboo runtimes (and the codexctl/tmux mechanics)."
+        "decision": "odw is zero-install: no project files to scaffold. It dispatches each node to `pandacode <runtime> exec`, so it requires only Node.js + the pandacode binary. PandaCode owns the codex/claude/bamboo runtimes."
     }))
 }
 
@@ -499,17 +299,6 @@ fn render_doctor_human(report: &serde_json::Value) -> String {
         "{} bamboo: {}",
         if bamboo_ready > 0 { "⚠️" } else { "❌" },
         bamboo_human_status(&report["bamboo_keys"])
-    ));
-    lines.push(String::new());
-    lines.push(format!(
-        "{} project odw: {}",
-        icon(value_ok(&report["project_odw"])),
-        project_human_status(&report["project_odw"])
-    ));
-    lines.push(format!(
-        "{} pack: {}",
-        icon(value_ok(&report["pack"])),
-        pack_human_status(&report["pack"])
     ));
     lines.join("\n")
 }
@@ -598,42 +387,6 @@ fn bamboo_ready_count(value: &serde_json::Value) -> usize {
         return 0;
     };
     map.values().filter(|item| value_ok(item)).count()
-}
-
-fn project_human_status(value: &serde_json::Value) -> String {
-    if value_ok(value) {
-        format!("installed ({})", value_summary(value))
-    } else {
-        format!("missing ({}) - run `odw init --path .`", value_summary(value))
-    }
-}
-
-fn pack_human_status(value: &serde_json::Value) -> String {
-    if value_ok(value) {
-        "valid".to_string()
-    } else {
-        let missing: Vec<&str> = value
-            .get("missing")
-            .and_then(|field| field.as_array())
-            .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
-            .unwrap_or_default();
-        // A fresh checkout is missing the whole pack; dumping 50+ paths buries the
-        // one thing the user needs to do. Show a short, actionable line instead.
-        if missing.len() >= 10 {
-            return "not installed - run `odw init --path .`".to_string();
-        }
-        let detail = if missing.is_empty() {
-            "pack files".to_string()
-        } else {
-            let shown = missing.iter().take(4).copied().collect::<Vec<_>>().join(", ");
-            if missing.len() > 4 {
-                format!("{shown}, +{} more", missing.len() - 4)
-            } else {
-                shown
-            }
-        };
-        format!("incomplete ({detail}) - run `odw init --path . --force` if intended")
-    }
 }
 
 fn run_codex_status(codexctl_bin: &str) -> serde_json::Value {
@@ -735,19 +488,6 @@ fn env_is_set(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
-fn run_project_odw_status(root: &Path) -> ToolStatus {
-    let command = root.join(ODW_PROJECT_BIN_PATH);
-    if !command.exists() {
-        return ToolStatus {
-            ok: false,
-            command: command.to_string_lossy().to_string(),
-            summary: "project-local ODW wrapper is missing".to_string(),
-        };
-    }
-    let command_text = command.to_string_lossy().to_string();
-    run_version(&command_text, &["--version"])
-}
-
 fn run_pandacode_doctor_report(pandacode_bin: &str, root: &Path) -> serde_json::Value {
     let command = vec![
         pandacode_bin.to_string(),
@@ -783,243 +523,6 @@ fn run_pandacode_doctor_report(pandacode_bin: &str, root: &Path) -> serde_json::
             "summary": error.to_string()
         }),
     }
-}
-
-fn list_agents(root: &Path, built_in: bool) -> Result<()> {
-    if built_in {
-        for agent in built_in_agents() {
-            println!("{}\t{}", agent.name, agent.description);
-        }
-        return Ok(());
-    }
-    let dir = normalize_root(root)?.join(".claude/agents");
-    if !dir.exists() {
-        println!("no installed agents at {}", dir.display());
-        return Ok(());
-    }
-    for entry in sorted_files(&dir)? {
-        let content = fs::read_to_string(&entry)?;
-        let name = frontmatter_value(&content, "name").unwrap_or_else(|| {
-            entry
-                .file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
-        let description = frontmatter_value(&content, "description").unwrap_or_default();
-        println!("{}\t{}", name, description);
-    }
-    Ok(())
-}
-
-fn list_workflows(root: &Path) -> Result<()> {
-    let root = normalize_root(root)?;
-    let workflow_dir = root.join(".claude/workflows");
-    let command_dir = root.join(".claude/commands");
-    println!("workflows:");
-    if workflow_dir.exists() {
-        for file in sorted_files(&workflow_dir)? {
-            println!("  {}", relative_display(&root, &file));
-        }
-    } else {
-        println!("  none");
-    }
-    println!("commands:");
-    if command_dir.exists() {
-        for file in sorted_files(&command_dir)? {
-            println!("  {}", relative_display(&root, &file));
-        }
-    } else {
-        println!("  none");
-    }
-    Ok(())
-}
-
-fn graphs_list(root: &Path) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&graphs_list_report(root)?)?
-    );
-    Ok(())
-}
-
-fn graphs_list_report(root: &Path) -> Result<serde_json::Value> {
-    let root = normalize_root(root)?;
-    let mut graphs = Vec::new();
-    let workflow_dir = root.join(".claude/workflows");
-    if workflow_dir.exists() {
-        for file in sorted_files(&workflow_dir)? {
-            if file.extension().and_then(|value| value.to_str()) == Some("js") {
-                graphs.push(workflow_script_graph_summary(&root, &file)?);
-            }
-        }
-    }
-    let graph_dir = root.join(".odw/graphs");
-    if graph_dir.exists() {
-        for file in sorted_files(&graph_dir)? {
-            if file.extension().and_then(|value| value.to_str()) == Some("json") {
-                graphs.push(graph_manifest_summary(&root, &file)?);
-            }
-        }
-    }
-    Ok(json!({
-        "root": root,
-        "graphs": graphs
-    }))
-}
-
-fn workflow_script_graph_summary(root: &Path, file: &Path) -> Result<serde_json::Value> {
-    let content = fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
-    Ok(json!({
-        "kind": "workflow_script",
-        "path": relative_display(root, file),
-        "name": extract_js_meta_string(&content, "name").unwrap_or_else(|| {
-            file.file_stem()
-                .and_then(|name| name.to_str())
-                .unwrap_or("workflow")
-                .to_string()
-        }),
-        "has_meta": content.contains("export const meta"),
-        "features": {
-            "agent": content.contains("agent("),
-            "fanout": content.contains("fanout("),
-            "parallel": content.contains("parallel("),
-            "pipeline": content.contains("pipeline("),
-            "checkpoint": content.contains("checkpoint("),
-            "prompt_slots": content.contains("promptSlot("),
-            "schema": content.contains("schema:")
-        },
-        "valid": content.contains("export const meta") && content.contains("agent("),
-        "issues": workflow_script_graph_issues(&content)
-    }))
-}
-
-fn workflow_script_graph_issues(content: &str) -> Vec<String> {
-    let mut issues = Vec::new();
-    if !content.contains("export const meta") {
-        issues.push("missing export const meta".to_string());
-    }
-    if !content.contains("agent(") {
-        issues.push("no agent(...) node calls detected".to_string());
-    }
-    issues
-}
-
-fn graph_manifest_summary(root: &Path, file: &Path) -> Result<serde_json::Value> {
-    let content = fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
-    let parsed = serde_json::from_str::<serde_json::Value>(&content).ok();
-    let mut issues = Vec::new();
-    let mut name = file
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("graph")
-        .to_string();
-    if let Some(value) = &parsed {
-        if let Some(parsed_name) = json_string(value, "name") {
-            name = parsed_name;
-        }
-        if value.get("start").is_none() {
-            issues.push("missing start".to_string());
-        }
-        if value.get("end").is_none() {
-            issues.push("missing end".to_string());
-        }
-        if !value.get("nodes").is_some_and(|nodes| nodes.is_array()) {
-            issues.push("nodes must be an array".to_string());
-        }
-        if !value.get("edges").is_some_and(|edges| edges.is_array()) {
-            issues.push("edges must be an array".to_string());
-        }
-    } else {
-        issues.push("invalid JSON".to_string());
-    }
-    Ok(json!({
-        "kind": "graph_manifest",
-        "path": relative_display(root, file),
-        "name": name,
-        "valid": issues.is_empty(),
-        "issues": issues
-    }))
-}
-
-fn extract_js_meta_string(content: &str, key: &str) -> Option<String> {
-    for (prefix, quote) in [
-        (format!("{key}: \""), '"'),
-        (format!("{key}: '"), '\''),
-        (format!("\"{key}\": \""), '"'),
-        (format!("'{key}': '"), '\''),
-    ] {
-        if let Some(start) = content.find(&prefix) {
-            let rest = &content[start + prefix.len()..];
-            if let Some(end) = rest.find(quote) {
-                return Some(rest[..end].to_string());
-            }
-        }
-    }
-    None
-}
-
-fn remove_workflow(root: &Path, name: &str, dry_run: bool) -> Result<()> {
-    for action in remove_workflow_actions(root, name, dry_run)? {
-        println!("{action}");
-    }
-    Ok(())
-}
-
-fn remove_workflow_actions(root: &Path, name: &str, dry_run: bool) -> Result<Vec<String>> {
-    let root = normalize_root(root)?;
-    let normalized = name.trim().trim_start_matches('/').trim_end_matches(".md");
-    if normalized.is_empty() {
-        bail!("workflow name cannot be empty");
-    }
-    let candidates = [
-        root.join(format!(".claude/workflows/{normalized}.js")),
-        root.join(format!(".claude/workflows/odw-{normalized}.js")),
-        root.join(format!(".claude/workflows/{normalized}.md")),
-        root.join(format!(".claude/workflows/odw-{normalized}.md")),
-        root.join(format!(".claude/commands/{normalized}.md")),
-        root.join(format!(".claude/commands/odw-{normalized}.md")),
-    ];
-    let mut found = false;
-    let mut actions = Vec::new();
-    for path in candidates {
-        if !path.exists() {
-            continue;
-        }
-        found = true;
-        if dry_run {
-            actions.push(format!("remove {}", path.display()));
-        } else {
-            fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
-            actions.push(format!("removed {}", path.display()));
-        }
-    }
-    if !found {
-        bail!("no workflow or command named {normalized:?} found under .claude");
-    }
-    Ok(actions)
-}
-
-fn validate(root: &Path) -> Result<()> {
-    let root = normalize_root(root)?;
-    let status = validate_pack_status(&root);
-    if !status.ok {
-        println!("{}", serde_json::to_string_pretty(&status)?);
-        bail!("Open Dynamic Workflow validation failed");
-    }
-    println!("{}", serde_json::to_string_pretty(&status)?);
-    Ok(())
-}
-
-fn evidence(args: EvidenceArgs) -> Result<()> {
-    let report = workflow_evidence_report(
-        &args.path,
-        args.claude_projects_dir.as_deref(),
-        args.session_id.as_deref(),
-        args.run_id.as_deref(),
-    )?;
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
 }
 
 fn runs_list(root: &Path) -> Result<()> {
@@ -2187,168 +1690,11 @@ fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
-fn workflow_evidence_report(
-    root: &Path,
-    claude_projects_dir: Option<&Path>,
-    session_filter: Option<&str>,
-    run_filter: Option<&str>,
-) -> Result<serde_json::Value> {
-    let root = normalize_root(root)?;
-    let projects_dir = match claude_projects_dir {
-        Some(path) => path.to_path_buf(),
-        None => default_claude_projects_dir()?,
-    };
-    let project_slug = claude_project_slug(&root);
-    let project_dir = projects_dir.join(&project_slug);
-    let mut artifacts = Vec::new();
-
-    if project_dir.exists() {
-        for session_dir in sorted_dirs(&project_dir)? {
-            let session_id = session_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("")
-                .to_string();
-            if let Some(filter) = session_filter
-                && session_id != filter
-            {
-                continue;
-            }
-            let workflows_dir = session_dir.join("workflows");
-            if !workflows_dir.exists() {
-                continue;
-            }
-            for artifact in sorted_files(&workflows_dir)? {
-                if artifact.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                    continue;
-                }
-                let content = fs::read_to_string(&artifact)
-                    .with_context(|| format!("read {}", artifact.display()))?;
-                let value: serde_json::Value = serde_json::from_str(&content)
-                    .with_context(|| format!("parse {}", artifact.display()))?;
-                let run_id = value
-                    .get("runId")
-                    .and_then(|field| field.as_str())
-                    .unwrap_or("");
-                if let Some(filter) = run_filter
-                    && run_id != filter
-                {
-                    continue;
-                }
-                artifacts.push(workflow_artifact_summary(
-                    &project_dir,
-                    &session_id,
-                    &artifact,
-                    &value,
-                ));
-            }
-        }
-    }
-
-    Ok(json!({
-        "ok": !artifacts.is_empty(),
-        "project": root.to_string_lossy(),
-        "claude_project_slug": project_slug,
-        "claude_project_dir": project_dir.to_string_lossy(),
-        "filters": {
-            "session_id": session_filter,
-            "run_id": run_filter
-        },
-        "artifacts": artifacts,
-        "note": "This reads Claude Code workflow artifacts. It does not control live /workflows state."
-    }))
-}
-
-fn workflow_artifact_summary(
-    project_dir: &Path,
-    session_id: &str,
-    artifact: &Path,
-    value: &serde_json::Value,
-) -> serde_json::Value {
-    let phases = value
-        .get("phases")
-        .and_then(|field| field.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .map(|phase| {
-                    json!({
-                        "title": json_string(phase, "title"),
-                        "detail": json_string(phase, "detail")
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let agents = value
-        .get("workflowProgress")
-        .and_then(|field| field.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter(|item| {
-                    item.get("type").and_then(|field| field.as_str()) == Some("workflow_agent")
-                })
-                .map(|agent| {
-                    json!({
-                        "index": agent.get("index").and_then(|field| field.as_u64()),
-                        "label": json_string(agent, "label"),
-                        "phase": json_string(agent, "phaseTitle"),
-                        "agent_id": json_string(agent, "agentId"),
-                        "agent_type": json_string(agent, "agentType"),
-                        "model": json_string(agent, "model"),
-                        "state": json_string(agent, "state"),
-                        "attempt": agent.get("attempt").and_then(|field| field.as_u64()),
-                        "tool_calls": agent.get("toolCalls").and_then(|field| field.as_u64()),
-                        "tokens": agent.get("tokens").and_then(|field| field.as_u64())
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    json!({
-        "path": artifact.to_string_lossy(),
-        "relative_path": relative_display(project_dir, artifact),
-        "session_id": session_id,
-        "run_id": json_string(value, "runId"),
-        "workflow_name": json_string(value, "workflowName"),
-        "status": json_string(value, "status"),
-        "summary": json_string(value, "summary"),
-        "timestamp": json_string(value, "timestamp"),
-        "script_path": json_string(value, "scriptPath"),
-        "default_model": json_string(value, "defaultModel"),
-        "agent_count": value.get("agentCount").and_then(|field| field.as_u64()).unwrap_or(agents.len() as u64),
-        "total_tokens": value.get("totalTokens").and_then(|field| field.as_u64()),
-        "total_tool_calls": value.get("totalToolCalls").and_then(|field| field.as_u64()),
-        "duration_ms": value.get("durationMs").and_then(|field| field.as_u64()),
-        "phases": phases,
-        "agents": agents
-    })
-}
-
 fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
         .and_then(|field| field.as_str())
         .map(ToString::to_string)
-}
-
-fn default_claude_projects_dir() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass --claude-projects-dir"))?;
-    Ok(home.join(".claude/projects"))
-}
-
-fn claude_project_slug(root: &Path) -> String {
-    root.to_string_lossy()
-        .chars()
-        .map(|ch| match ch {
-            '/' | '\\' => '-',
-            _ => ch,
-        })
-        .collect()
 }
 
 fn capabilities_json() -> serde_json::Value {
@@ -2419,6 +1765,7 @@ fn framework_spec_json() -> serde_json::Value {
         "name": "Open Dynamic Workflow",
         "short_name": "ODW",
         "version": ODW_VERSION,
+        "types_dts": pack::WORKFLOW_API_DTS,
         "compatibility_target": {
             "runtime": "ODW direct JavaScript runner",
             "optional_runtime": "Claude Code Dynamic Workflows",
@@ -2478,135 +1825,6 @@ fn framework_spec_json() -> serde_json::Value {
     })
 }
 
-fn validate_pack_status(root: &Path) -> PackStatus {
-    let mut missing = Vec::new();
-    let mut invalid_agents = Vec::new();
-    let mut invalid_files = Vec::new();
-    for file in pack_files() {
-        let target = root.join(file.path);
-        if !target.exists() {
-            missing.push(file.path.to_string());
-        }
-    }
-    let project_bin = root.join(ODW_PROJECT_BIN_PATH);
-    if !project_bin.exists() {
-        missing.push(ODW_PROJECT_BIN_PATH.to_string());
-    }
-    #[cfg(unix)]
-    if project_bin.exists() {
-        use std::os::unix::fs::PermissionsExt;
-
-        match fs::metadata(&project_bin) {
-            Ok(metadata) if metadata.permissions().mode() & 0o111 == 0 => {
-                invalid_files.push(format!("{ODW_PROJECT_BIN_PATH} is not executable"));
-            }
-            Err(error) => invalid_files.push(format!(
-                "{ODW_PROJECT_BIN_PATH}: failed to read permissions: {error}"
-            )),
-            _ => {}
-        }
-    }
-    let agent_dir = root.join(".claude/agents");
-    if agent_dir.exists() {
-        match sorted_files(&agent_dir) {
-            Ok(files) => {
-                for file in files {
-                    match fs::read_to_string(&file) {
-                        Ok(content)
-                            if frontmatter_value(&content, "name").is_none()
-                                || frontmatter_value(&content, "description").is_none() =>
-                        {
-                            invalid_agents.push(relative_display(root, &file));
-                        }
-                        Ok(_) => {}
-                        Err(error) => invalid_files.push(format!(
-                            "{}: failed to read: {error}",
-                            relative_display(root, &file)
-                        )),
-                    }
-                }
-            }
-            Err(error) => invalid_agents.push(error.to_string()),
-        }
-    }
-    for agent in built_in_agents() {
-        let file = root.join(format!(".claude/agents/{}.md", agent.name));
-        if !file.exists() {
-            missing.push(file.to_string_lossy().to_string());
-        }
-    }
-    for required in [
-        ".claude/workflows/odw-audit.js",
-        ".claude/workflows/odw-ship.js",
-        ".claude/workflows/odw-flow.js",
-        ".odw/framework/runtime-contract.md",
-        ".odw/framework/workflow-api.d.ts",
-        ".odw/schemas/codex-plan.schema.json",
-        ".odw/schemas/codex-result.schema.json",
-        ".odw/schemas/error-feedback.schema.json",
-        ".odw/schemas/task-plan.schema.json",
-        ".odw/schemas/task-join.schema.json",
-        ".odw/schemas/quality-gate.schema.json",
-        ".odw/schemas/verifier.schema.json",
-        ".odw/schemas/workflow-manifest.schema.json",
-    ] {
-        let file = root.join(required);
-        if !file.exists() {
-            missing.push(required.to_string());
-        }
-    }
-    let schema_dir = root.join(".odw/schemas");
-    match fs::read_dir(&schema_dir) {
-        Ok(entries) => {
-            for entry in entries {
-                match entry {
-                    Ok(schema) => {
-                        let path = schema.path();
-                        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
-                            match fs::read_to_string(&path) {
-                                Ok(content)
-                                    if serde_json::from_str::<serde_json::Value>(&content)
-                                        .is_err() =>
-                                {
-                                    invalid_files.push(relative_display(root, &path));
-                                }
-                                Ok(_) => {}
-                                Err(error) => invalid_files.push(format!(
-                                    "{}: failed to read: {error}",
-                                    relative_display(root, &path)
-                                )),
-                            }
-                        }
-                    }
-                    Err(error) => invalid_files.push(format!(
-                        "{}: failed to read directory entry: {error}",
-                        relative_display(root, &schema_dir)
-                    )),
-                }
-            }
-        }
-        Err(error) => invalid_files.push(format!(
-            "{}: failed to read directory: {error}",
-            relative_display(root, &schema_dir)
-        )),
-    }
-    let settings = root.join(".claude/settings.odw.example.json");
-    if let Ok(content) = fs::read_to_string(&settings)
-        && !content.contains("odw exec")
-    {
-        invalid_files.push(format!(
-            "{} missing the odw exec permission example",
-            relative_display(root, &settings)
-        ));
-    }
-    PackStatus {
-        ok: missing.is_empty() && invalid_agents.is_empty() && invalid_files.is_empty(),
-        missing,
-        invalid_agents,
-        invalid_files,
-    }
-}
-
 fn normalize_root(root: &Path) -> Result<PathBuf> {
     if root.exists() {
         root.canonicalize()
@@ -2614,16 +1832,6 @@ fn normalize_root(root: &Path) -> Result<PathBuf> {
     } else {
         Ok(root.to_path_buf())
     }
-}
-
-fn sorted_files(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = fs::read_dir(dir)
-        .with_context(|| format!("read {}", dir.display()))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    files.sort();
-    Ok(files)
 }
 
 fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -2634,13 +1842,6 @@ fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
         .collect::<Vec<_>>();
     dirs.sort();
     Ok(dirs)
-}
-
-fn relative_display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .to_string()
 }
 
 fn run_version(command: &str, args: &[&str]) -> ToolStatus {
@@ -2665,38 +1866,11 @@ fn run_version(command: &str, args: &[&str]) -> ToolStatus {
     }
 }
 
-fn frontmatter_value(content: &str, key: &str) -> Option<String> {
-    let mut lines = content.lines();
-    if lines.next()? != "---" {
-        return None;
-    }
-    for line in lines {
-        if line == "---" {
-            break;
-        }
-        let Some((left, right)) = line.split_once(':') else {
-            continue;
-        };
-        if left.trim() == key {
-            return Some(right.trim().trim_matches('"').to_string());
-        }
-    }
-    None
-}
-
 #[derive(serde::Serialize)]
 struct ToolStatus {
     ok: bool,
     command: String,
     summary: String,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct PackStatus {
-    ok: bool,
-    missing: Vec<String>,
-    invalid_agents: Vec<String>,
-    invalid_files: Vec<String>,
 }
 
 struct BuiltInAgent {
@@ -2741,10 +1915,6 @@ fn built_in_agents() -> &'static [BuiltInAgent] {
     ]
 }
 
-fn pack_files() -> &'static [pack::PackFile] {
-    pack::files()
-}
-
 fn contract_text() -> &'static str {
     pack::contract_text()
 }
@@ -2759,141 +1929,6 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    #[test]
-    fn init_installs_pack_and_validates() {
-        let root = temp_root("init-validates");
-        fs::create_dir_all(&root).unwrap();
-        init(&root, false, false).unwrap();
-        let status = validate_pack_status(&root);
-        assert!(status.ok, "{status:?}");
-        assert!(root.join(".claude/agents/odw-codex-coder.md").exists());
-        assert!(root.join(".claude/workflows/odw-audit.js").exists());
-        assert!(root.join(".claude/workflows/odw-flow.js").exists());
-        assert!(root.join(ODW_PROJECT_BIN_PATH).exists());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let mode = fs::metadata(root.join(ODW_PROJECT_BIN_PATH))
-                .unwrap()
-                .permissions()
-                .mode();
-            assert!(mode & 0o111 != 0);
-        }
-        assert!(root.join(".odw/framework/workflow-api.d.ts").exists());
-        assert!(root.join(".odw/schemas/codex-plan.schema.json").exists());
-        assert!(root.join(".odw/schemas/codex-result.schema.json").exists());
-        assert!(root.join(".odw/schemas/task-plan.schema.json").exists());
-        assert!(root.join(".odw/schemas/task-join.schema.json").exists());
-        assert!(root.join(".odw/schemas/quality-gate.schema.json").exists());
-        assert!(
-            root.join(".odw/schemas/workflow-manifest.schema.json")
-                .exists()
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn validate_pack_status_reports_unreadable_checked_file() {
-        let root = temp_root("validate-unreadable");
-        fs::create_dir_all(&root).unwrap();
-        init(&root, false, false).unwrap();
-
-        let relative = ".odw/schemas/codex-plan.schema.json";
-        let schema = root.join(relative);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-
-            let original_permissions = fs::metadata(&schema).unwrap().permissions();
-            let mut unreadable = original_permissions.clone();
-            unreadable.set_mode(0o000);
-            fs::set_permissions(&schema, unreadable).unwrap();
-
-            let status = validate_pack_status(&root);
-
-            fs::set_permissions(&schema, original_permissions).unwrap();
-            if status
-                .invalid_files
-                .iter()
-                .any(|invalid| invalid.contains(relative))
-            {
-                fs::remove_dir_all(root).unwrap();
-                return;
-            }
-        }
-
-        fs::write(&schema, "{not json").unwrap();
-        let status = validate_pack_status(&root);
-        assert!(
-            status
-                .invalid_files
-                .iter()
-                .any(|invalid| invalid.contains(relative)),
-            "{status:?}"
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn graphs_list_reports_workflow_scripts_and_manifests() {
-        let root = temp_root("graphs-list");
-        fs::create_dir_all(&root).unwrap();
-        init(&root, false, false).unwrap();
-
-        let report = graphs_list_report(&root).unwrap();
-        let graphs = report["graphs"].as_array().unwrap();
-        assert!(graphs.iter().any(|graph| graph["kind"] == "workflow_script"
-            && graph["name"] == "odw-flow"
-            && graph["features"]["fanout"] == true
-            && graph["features"]["checkpoint"] == true
-            && graph["features"]["schema"] == true
-            && graph["valid"] == true));
-
-        fs::create_dir_all(root.join(".odw/graphs")).unwrap();
-        fs::write(
-            root.join(".odw/graphs/custom.json"),
-            r#"{"name":"custom","start":"a","end":"b","nodes":[],"edges":[]}"#,
-        )
-        .unwrap();
-        let report = graphs_list_report(&root).unwrap();
-        assert!(
-            report["graphs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|graph| graph["kind"] == "graph_manifest"
-                    && graph["name"] == "custom"
-                    && graph["valid"] == true)
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn remove_short_workflow_name_deletes_command_and_script() {
-        let root = temp_root("remove-workflow");
-        fs::create_dir_all(&root).unwrap();
-        init(&root, false, false).unwrap();
-        remove_workflow(&root, "audit", false).unwrap();
-        assert!(!root.join(".claude/workflows/odw-audit.js").exists());
-        assert!(!root.join(".claude/commands/odw-audit.md").exists());
-        assert!(root.join(".claude/workflows/odw-ship.js").exists());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn frontmatter_value_reads_basic_fields() {
-        let content = "---\nname: odw-test\ndescription: Example\n---\nBody";
-        assert_eq!(
-            frontmatter_value(content, "name").as_deref(),
-            Some("odw-test")
-        );
-        assert_eq!(
-            frontmatter_value(content, "description").as_deref(),
-            Some("Example")
-        );
-    }
 
     #[test]
     fn capabilities_expose_lifecycle_boundaries() {
@@ -3197,65 +2232,6 @@ return { ok: true };
         assert!(result.is_err());
 
         fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn claude_project_slug_matches_claude_code_layout() {
-        assert_eq!(
-            claude_project_slug(Path::new("/home/user/workspace/odw")),
-            "-home-user-workspace-odw"
-        );
-    }
-
-    #[test]
-    fn evidence_reads_claude_workflow_artifacts() {
-        let root = temp_root("evidence-project");
-        let claude_projects = temp_root("evidence-claude");
-        fs::create_dir_all(&root).unwrap();
-        let slug = claude_project_slug(&root.canonicalize().unwrap());
-        let workflow_dir = claude_projects
-            .join(slug)
-            .join("session-123")
-            .join("workflows");
-        fs::create_dir_all(&workflow_dir).unwrap();
-        fs::write(
-            workflow_dir.join("wf_test.json"),
-            r#"{
-              "runId": "wf_test",
-              "workflowName": "odw-smoke",
-              "status": "completed",
-              "agentCount": 2,
-              "phases": [{"title": "Research", "detail": "read files"}],
-              "workflowProgress": [
-                {
-                  "type": "workflow_agent",
-                  "index": 1,
-                  "label": "research",
-                  "phaseTitle": "Research",
-                  "agentId": "agent-1",
-                  "agentType": "odw-researcher",
-                  "model": "claude-sonnet",
-                  "state": "done",
-                  "attempt": 1,
-                  "toolCalls": 0,
-                  "tokens": 10
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
-
-        let report =
-            workflow_evidence_report(&root, Some(&claude_projects), None, Some("wf_test")).unwrap();
-        assert_eq!(report["ok"], true);
-        assert_eq!(report["artifacts"][0]["run_id"], "wf_test");
-        assert_eq!(
-            report["artifacts"][0]["agents"][0]["agent_type"],
-            "odw-researcher"
-        );
-
-        fs::remove_dir_all(root).unwrap();
-        fs::remove_dir_all(claude_projects).unwrap();
     }
 
     fn temp_root(name: &str) -> PathBuf {

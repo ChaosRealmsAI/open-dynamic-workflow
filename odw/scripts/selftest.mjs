@@ -658,8 +658,7 @@ return { ok:true };`;
 
 test("doctor: Bamboo is reported but missing api_key does not fail ODW top-level health", () => {
   const root = mkdtempSync(join(tmpRoot, "doctor-"));
-  const init = runOdw(["init", "--path", root], { pandacodeBin: fakePanda });
-  assert(init.code === 0, `doctor fixture init failed: ${init.out.slice(-300)}`);
+  // odw is zero-install — doctor needs no scaffolded pack, just runs against a dir.
   const r = runOdw(["doctor", "--path", root, "--pandacode-bin", fakePanda], {
     pandacodeBin: fakePanda,
     env: { DEEPSEEK_API_KEY: "set-for-selftest" }
@@ -704,7 +703,7 @@ return { ok: r?.ok !== false };`;
 
 // 11. .d.ts contract matches the real sandbox globals (no drift) -------------
 test("contract: workflow-api.d.ts globals exactly match the runtime sandbox", () => {
-  const dts = readFileSync(join(REPO, "src/pack/templates/odw/framework/workflow-api.d.ts"), "utf8");
+  const dts = readFileSync(join(REPO, "src/pack/templates/workflow-api.d.ts"), "utf8");
   const runner = readFileSync(join(REPO, "src/pack/templates/runtime/odw-js-runner.mjs"), "utf8");
   const dtsNames = new Set([...dts.matchAll(/export declare (?:const|function) (\w+)/g)].map((m) => m[1]));
   const block = runner.match(/function workflowSandboxGlobals\([^)]*\)\s*\{[\s\S]*?return \{([\s\S]*?)\};/);

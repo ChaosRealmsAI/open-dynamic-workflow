@@ -3,29 +3,29 @@
 Open Dynamic Workflow (`odw`) is a script-driven workflow runner for
 agent-authored JavaScript workflows.
 
-An agent can write a workflow script, then run it directly:
+It is **zero install** — nothing is scaffolded into your project. Run `odw guide`
+for the full self-contained usage guide, then write a workflow script and run it:
 
 ```bash
-odw exec --script .claude/workflows/odw-flow.js --input-file workflow-input.json --backend pandacode
+odw guide                                                 # how to author + run (self-contained)
+odw exec --script wf.js --input-file input.json --backend pandacode
 odw exec --resume latest
 odw runs show latest
 ```
 
-`workflow-input.json` should contain the goal and `prompts` object for the
-slots declared by the selected workflow. Mock runs may use suggested prompt text
-from the starter scripts.
+`input.json` (optional) contains the goal and any `prompts` for slots the
+workflow declares; it is exposed to the script as `args`.
 
 The JavaScript workflow owns phases, branching, fan-out, intermediate results,
 checkpoints, and synthesis. ODW provides the direct runner, node logs, resume
-state, schema validation, and a PandaCode bridge for Claude/tmux plus
-Codex/appserver executor nodes.
+state, schema validation, and a PandaCode bridge for the Claude / Codex / Bamboo
+executor runtimes.
 
 ## Boundary
 
 ```text
 Agent or CLI caller
   -> odw exec --script <workflow.js>
-  -> .claude/workflows/*.js
   -> phase(...)
   -> agent(prompt, { label, phase, runtime, provider?, model?, schema?, schemaDescription?, agentType? })
   -> .odw/runs/<run_id>/events.jsonl + state.json
@@ -59,12 +59,13 @@ cargo install --path .          # put `odw` on PATH (recommended)
 cargo build --release           # or just build: ./target/release/odw
 ```
 
-Then scaffold a project and check the executor wiring:
+**Zero install — nothing to scaffold.** odw never writes files into your project.
+The binary is self-documenting, so any agent can use it straight from the CLI:
 
 ```bash
-odw init --path /path/to/project      # writes the pack (below)
-odw validate --path /path/to/project  # asserts the pack is intact
-odw doctor                            # checks node + runtimes + binaries (exits non-zero if unhealthy)
+odw guide                       # the full self-contained authoring + run guide (read this first)
+odw doctor                      # check node + the pandacode executor are wired up
+odw spec | odw contract         # machine-readable API types + the authoring contract
 ```
 
 `odw` finds the `pandacode` binary automatically when it sits next to `odw` (the
@@ -72,23 +73,11 @@ workspace builds both into the same dir, whether `cargo install` or `cargo
 build`). Only set `ODW_PANDACODE_BIN=/path/to/pandacode` (or `--pandacode-bin`)
 if yours lives elsewhere.
 
-`odw init` writes:
-
-```text
-.odw/odw.toml  .odw/README.md  .odw/bin/odw  .odw/runs/
-.odw/framework/runtime-contract.md  .odw/framework/workflow-api.d.ts
-.odw/schemas/*.schema.json
-.claude/skills/odw/SKILL.md          # agent-usable skill — pick up and go
-.claude/agents/odw-*.md  .claude/commands/odw*.md
-.claude/workflows/odw-authoring-contract.md
-.claude/workflows/odw-{audit,ship,flow}.js
-.claude/settings.odw.example.json
-```
-
-**For agents:** after `odw init`, a Claude Code skill is installed at
-`.claude/skills/odw/SKILL.md` (canonical copy: `skills/odw/` in this repo). Load
-it and you have install + authoring + run instructions in one place — no need to
-read the source.
+**For agents:** run `odw guide`. It is the single self-contained entry point —
+what odw is, the full authoring API, how to run, and the gotchas. No skill to
+install, no files to read; the same content any AI (Claude, codex, or otherwise)
+gets straight from the CLI. `odw spec` adds the TypeScript types; `odw contract`
+the full authoring contract.
 
 ## Direct Usage
 
@@ -270,46 +259,24 @@ branching, fan-out, loops, intermediate state, and final aggregation.
 - pause/resume: `odw exec --resume latest`
 - stop: stop the invoking process, or use `/workflows` for Claude-launched runs
 - restart node: direct exec resumes by the stable `prompt + options` cache key;
-  completed nodes are skipped from state
-- remove saved template: `odw workflows remove <name>`
-- read artifact evidence: `odw evidence --path .`
+  completed nodes are skipped from state (editing a node's prompt re-runs it)
 - live logs: `odw exec` streams node progress
 - local journals: `odw runs list` and `odw runs show latest`
-
-## Agent Types
-
-- `odw-orchestrator`: plans workflows and routes work
-- `odw-researcher`: read-only repository discovery
-- `odw-security-reviewer`: evidence-backed security review
-- `odw-codex-coder`: implements scoped code edits single-shot via the PandaCode
-  Codex executor (`runtime: "codex"`)
-- `odw-test-runner`: scoped command verification
-- `odw-failure-analyst`: structured retry/blocker feedback for failed workers
-- `odw-verifier`: adversarial claim validation
-- `odw-synthesizer`: final concise synthesis
-
-Subagent model and tool selection remain Claude Code-native through each
-`.claude/agents/*.md` frontmatter.
 
 ## CLI
 
 ```bash
-odw init --path .
-odw doctor --path .
-odw validate --path .
-odw spec
-odw capabilities
-odw exec --script .claude/workflows/odw-audit.js --input '{"goal":"README smoke"}' --backend mock
-odw exec --script .claude/workflows/odw-flow.js --input '{"goal":"complex flow smoke"}' --backend mock
+odw guide                                            # self-contained authoring + run guide
+odw doctor                                           # check node + pandacode are wired up
+odw spec                                             # framework spec + TypeScript API types
+odw contract                                         # full authoring contract
+odw capabilities                                     # machine-readable capability map
+odw exec --script wf.js --input '{"goal":"x"}' --backend mock   # token-free dry run
+odw exec --script wf.js --backend pandacode          # real run
 odw exec --resume latest
-odw evidence --path .
-odw runs list --path .
-odw runs show latest --path .
-odw agents list --path .
-odw agents list --built-in
-odw workflows list --path .
-odw workflows remove odw-audit --path . --dry-run
-odw contract
+odw report --script wf.js --open                     # HTML execution-graph preview
+odw runs list
+odw runs show latest
 ```
 
 `odw exec` is the direct runner. It streams workflow, phase, node, checkpoint,

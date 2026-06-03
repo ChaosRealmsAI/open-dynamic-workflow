@@ -130,6 +130,8 @@ enum RunsCommand {
     List {
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        #[arg(long, help = "Print the raw JSON run list")]
+        json: bool,
     },
     Show {
         #[arg(default_value = "latest")]
@@ -169,7 +171,7 @@ fn main() -> Result<()> {
         }
         Commands::Starter(args) => starter(args),
         Commands::Runs(command) => match command {
-            RunsCommand::List { path } => runs_list(&path),
+            RunsCommand::List { path, json } => runs_list(&path, json),
             RunsCommand::Show { run_id, path, tail } => runs_show(&path, &run_id, tail),
         },
         Commands::Exec(args) => exec_script(*args),
@@ -571,11 +573,13 @@ fn run_pandacode_doctor_report(pandacode_bin: &str, root: &Path) -> serde_json::
     }
 }
 
-fn runs_list(root: &Path) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&runs_list_report(root)?)?
-    );
+fn runs_list(root: &Path, json_output: bool) -> Result<()> {
+    let report = runs_list_report(root)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", format_runs_list_view(&report));
+    }
     Ok(())
 }
 
@@ -612,6 +616,63 @@ fn run_list_sort_key(value: &serde_json::Value) -> (u64, String) {
         .or_else(|| run_id_started_ms(&run_id))
         .unwrap_or(0);
     (started_ms, run_id)
+}
+
+fn format_runs_list_view(report: &serde_json::Value) -> String {
+    let runs_dir = json_string(report, "runs_dir").unwrap_or_else(|| ".odw/runs".to_string());
+    let runs = report
+        .get("runs")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = vec![format!("Runs in {runs_dir}")];
+    if runs.is_empty() {
+        lines.push("  (none)".to_string());
+        lines.push("Start one: odw exec --script <workflow.js> --input <json>".to_string());
+        return lines.join("\n");
+    }
+    for run in runs.iter().take(20) {
+        let run_id = json_string(run, "run_id").unwrap_or_else(|| "unknown".to_string());
+        let status = json_string(run, "status").unwrap_or_else(|| "unknown".to_string());
+        let workflow = json_string(run, "workflow")
+            .as_deref()
+            .map(short_workflow_label)
+            .unwrap_or_else(|| "-".to_string());
+        let duration = format_run_duration(run);
+        lines.push(format!(
+            "  - {run_id} [{status}] duration={duration} workflow={workflow}"
+        ));
+    }
+    if runs.len() > 20 {
+        lines.push(format!("  ... {} more run(s)", runs.len() - 20));
+    }
+    lines.push("Show: odw runs show <run_id|latest>".to_string());
+    lines.push("JSON: odw runs list --json".to_string());
+    lines.join("\n")
+}
+
+fn short_workflow_label(path: &str) -> String {
+    let candidate = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    if candidate.is_empty() {
+        "-".to_string()
+    } else {
+        candidate.to_string()
+    }
+}
+
+fn format_run_duration(run: &serde_json::Value) -> String {
+    let started = run.get("started_ms").and_then(|value| value.as_u64());
+    let finished = run.get("finished_ms").and_then(|value| value.as_u64());
+    match (started, finished) {
+        (Some(started), Some(finished)) if finished >= started => {
+            format!("{}ms", finished - started)
+        }
+        (Some(_), _) => "running".to_string(),
+        _ => "-".to_string(),
+    }
 }
 
 fn run_id_started_ms(run_id: &str) -> Option<u64> {
@@ -762,14 +823,7 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
     let run_id = json_string(run, "run_id").unwrap_or_else(|| "unknown".to_string());
     let status = json_string(run, "status").unwrap_or_else(|| "unknown".to_string());
     let workflow = json_string(run, "workflow").unwrap_or_else(|| "-".to_string());
-    let started = run.get("started_ms").and_then(|value| value.as_u64());
-    let finished = run.get("finished_ms").and_then(|value| value.as_u64());
-    let duration = match (started, finished) {
-        (Some(started), Some(finished)) if finished >= started => {
-            format!("{}ms", finished - started)
-        }
-        _ => "running".to_string(),
-    };
+    let duration = format_run_duration(run);
     let active = progress
         .get("active_agents")
         .and_then(|value| value.as_array())
@@ -2656,6 +2710,13 @@ mod tests {
 
         let list = runs_list_report(&root).unwrap();
         assert_eq!(list["runs"].as_array().unwrap().len(), 1);
+        let list_view = format_runs_list_view(&list);
+        assert!(list_view.contains("Runs in "));
+        assert!(list_view.contains("odw-run-test [completed]"));
+        assert!(list_view.contains("duration="));
+        assert!(list_view.contains("workflow=-"));
+        assert!(list_view.contains("Show: odw runs show <run_id|latest>"));
+        assert!(list_view.contains("JSON: odw runs list --json"));
         let shown = runs_show_report(&root, "latest", 5).unwrap();
         assert_eq!(shown["events"].as_array().unwrap().len(), 5);
         assert!(

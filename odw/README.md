@@ -274,7 +274,8 @@ branching, fan-out, loops, intermediate state, and final aggregation.
 - restart node: direct exec resumes by the stable `prompt + options` cache key;
   completed nodes are skipped from state (editing a node's prompt re-runs it)
 - live logs: `odw exec` streams node progress
-- local journals: `odw runs list` and `odw runs show latest`
+- local journals: `odw runs list` and `odw runs show latest`; use
+  `odw runs list --json` for the raw machine-readable list
 
 ## CLI
 
@@ -288,7 +289,8 @@ odw exec --script wf.js --input '{"goal":"x"}' --backend mock   # token-free dry
 odw exec --script wf.js --backend pandacode          # real run
 odw exec --resume latest
 odw report --script wf.js --open                     # HTML execution-graph preview
-odw runs list
+odw runs list                                      # compact run list
+odw runs list --json                               # raw run records
 odw runs show latest
 ```
 

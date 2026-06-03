@@ -151,7 +151,7 @@ If the request is broad, choose a small coherent first slice that can be reviewe
     TASKS = planned.tasks.map(normalizePlannedTask);
   }
   TASKS = TASKS || DEFAULT_TASKS;
-  const defaultReviewRounds = TASKS.length >= 3 ? 3 : 2;
+  const defaultReviewRounds = TASKS.length >= 4 ? 4 : TASKS.length >= 3 ? 3 : 2;
   const maxReviewRounds = Math.max(1, Math.min(4, Number(args?.maxReviewRounds || defaultReviewRounds)));
   const strictTaskFileBoundaries = args?.strictTaskFileBoundaries !== false;
   const allowDirtyTaskFiles = args?.allowDirtyTaskFiles === true;

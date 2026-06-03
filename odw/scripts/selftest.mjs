@@ -1489,7 +1489,7 @@ test("examples: parallel-review-apply includes symbol-named root cause with symp
   }
 });
 
-test("examples: parallel-review-apply defaults to three review rounds for 3+ tasks", () => {
+test("examples: parallel-review-apply defaults to three review rounds for 3 tasks", () => {
   const { dir } = makeGitRepo("odw-example-07-default-rounds-");
   try {
     const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
@@ -1517,6 +1517,43 @@ test("examples: parallel-review-apply defaults to three review rounds for 3+ tas
     const repairPlans = result.history.filter((item) => item.step === "repair_plan");
     assert(repairPlans.length === 2, `expected two repair plans: ${JSON.stringify(repairPlans)}`);
     assert(repairPlans.every((item) => item.tasks?.join("|") === "docs"), `wrong default-round repair tasks: ${JSON.stringify(repairPlans)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("examples: parallel-review-apply defaults to four review rounds for 4+ tasks", () => {
+  const { dir } = makeGitRepo("odw-example-07-default-four-rounds-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('default four rounds verify ok')\"",
+      tasks: [
+        { id: "core", file: "src/default-four-core.js", prompt: "Create src/default-four-core.js." },
+        { id: "api", file: "src/default-four-api.js", prompt: "Create src/default-four-api.js." },
+        { id: "tests", file: "test-default-four-rounds.mjs", prompt: "Create test-default-four-rounds.mjs." },
+        { id: "docs", file: "docs/default-four-rounds.md", prompt: "Create docs/default-four-rounds.md." }
+      ],
+      reviewers: [
+        {
+          label: "default-four-rounds-review",
+          runtime: "codex",
+          perspective: "MOCK_REJECT_THRICE_FILE:docs/default-four-rounds.md"
+        }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `example 07 default four rounds run failed: ${r.out.slice(-1400)}`);
+    const result = r.state.result;
+    const reviews = result.history.filter((item) => item.step === "review");
+    assert(
+      reviews.map((item) => item.decision).join("|") === "reject|reject|reject|approve",
+      `wrong review sequence: ${JSON.stringify(reviews)}`
+    );
+    const repairPlans = result.history.filter((item) => item.step === "repair_plan");
+    assert(repairPlans.length === 3, `expected three repair plans: ${JSON.stringify(repairPlans)}`);
+    assert(repairPlans.map((item) => item.round).join("|") === "2|3|4", `wrong repair rounds: ${JSON.stringify(repairPlans)}`);
+    assert(repairPlans.every((item) => item.tasks?.join("|") === "docs"), `wrong default-four repair tasks: ${JSON.stringify(repairPlans)}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

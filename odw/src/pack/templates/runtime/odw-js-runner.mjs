@@ -2183,15 +2183,15 @@ function mockResultForSchema(options, prompt) {
   }
   if (schemaName.endsWith("odw-worktree-review.schema.json")) {
     const text = String(prompt || "");
-    const repeatReject = text.match(/MOCK_REJECT_(ONCE|TWICE)/)?.[1];
+    const repeatReject = text.match(/MOCK_REJECT_(ONCE|TWICE|THRICE)/)?.[1];
     if (repeatReject) {
       const key = options.label || options.id || "review";
       const seen = mockReviewRejectOnce.get(key) || 0;
       mockReviewRejectOnce.set(key, seen + 1);
-      const rejectLimit = repeatReject === "TWICE" ? 2 : 1;
+      const rejectLimit = repeatReject === "THRICE" ? 3 : repeatReject === "TWICE" ? 2 : 1;
       if (seen < rejectLimit) {
-        const file = text.match(/MOCK_REJECT_(?:ONCE|TWICE)_FILE:([^\s]+)/)?.[1];
-        const blocker = text.match(/MOCK_REJECT_(?:ONCE|TWICE)_BLOCKER:([^\n]+)/)?.[1]?.trim();
+        const file = text.match(/MOCK_REJECT_(?:ONCE|TWICE|THRICE)_FILE:([^\s]+)/)?.[1];
+        const blocker = text.match(/MOCK_REJECT_(?:ONCE|TWICE|THRICE)_BLOCKER:([^\n]+)/)?.[1]?.trim();
         return {
           decision: "reject",
           summary: `mock review rejected attempt ${seen + 1}`,

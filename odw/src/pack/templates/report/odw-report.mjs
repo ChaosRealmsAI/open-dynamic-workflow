@@ -303,6 +303,11 @@ function historyTasks(item) {
 function historyArrayLen(item, key) {
   return Array.isArray(item?.[key]) ? item[key].length : 0;
 }
+function historyFirstText(item, key, maxChars = 180) {
+  const values = Array.isArray(item?.[key]) ? item[key] : [];
+  const first = values.find((value) => typeof value === "string" && value.trim());
+  return first ? ` — ${truncateText(first, maxChars)}` : "";
+}
 function formatHistoryItem(item) {
   const step = item?.step;
   const round = item?.round || 1;
@@ -318,7 +323,7 @@ function formatHistoryItem(item) {
     return `pre-review block r${round}: failed=${historyArrayLen(item, "failed_tasks")} scope_issues=${historyArrayLen(item, "scope_issues")}`;
   }
   if (step === "review") {
-    return `review r${round}: ${item.decision || "unknown"} applyReady=${Boolean(item.applyReady)} blockers=${blockers} files=${files}`;
+    return `review r${round}: ${item.decision || "unknown"} applyReady=${Boolean(item.applyReady)} blockers=${blockers} files=${files}${historyFirstText(item, "blockers")}`;
   }
   if (step === "repair_plan") {
     return `repair plan r${round}: tasks=${truncateText(tasks.join(","), 120)} retained_files=${historyArrayLen(item, "retained_files")}`;

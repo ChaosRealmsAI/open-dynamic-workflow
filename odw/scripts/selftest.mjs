@@ -1268,7 +1268,7 @@ test("report: rejected review gates expose blocker evidence", () => {
 phase("P","");
 const change = await agent("write rejected report event", { id:"change", label:"change", isolation:"worktree", mockWriteFile:"report-reject.txt" });
 const gate = await reviewWorktreeDiffs([change], { label:"report-reject", context:"MOCK_REJECT" });
-return { ok: true, gate };`, { cwd: dir });
+return { ok: true, gate, history:[{step:"review",round:1,decision:gate.decision,applyReady:gate.applyReady,blockers:gate.blockers,files:gate.files}] };`, { cwd: dir });
     assert(r.code === 0 && r.runId, `run failed: ${r.out.slice(-500)}`);
     const rep = spawnSync(ODW, ["report", "--path", dir, "--run", r.runId], { cwd: dir, encoding: "utf8" });
     assert((rep.status ?? 1) === 0, `report failed: ${((rep.stdout || "") + (rep.stderr || "")).slice(-300)}`);
@@ -1276,6 +1276,7 @@ return { ok: true, gate };`, { cwd: dir });
     const html = readFileSync(htmlPath, "utf8");
     assert(/gate: reject/.test(html), "reject gate node missing from report");
     assert(/blocker_samples/.test(html) && /mock blocker/.test(html), "reject gate blocker evidence missing from report");
+    assert(/review r1: reject applyReady=false blockers=1 files=1[^<]*mock blocker/.test(html), "review history blocker sample missing from report overview");
     assert(/review_decisions/.test(html) && /review:reject/.test(html), "reject gate reviewer decision evidence missing from report");
     assert(/"failed":false/.test(html), "a repaired/non-terminal reject gate should not mark the whole report failed");
   } finally {

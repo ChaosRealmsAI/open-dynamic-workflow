@@ -1010,6 +1010,13 @@ fn format_workflow_history_item_for_runs_show(item: &serde_json::Value) -> Optio
         .and_then(|value| value.as_array())
         .map(Vec::len)
         .unwrap_or(0);
+    let blocker_sample = item
+        .get("blockers")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|value| value.as_str())
+        .map(|value| format!(" — {}", truncate(value, 180)))
+        .unwrap_or_default();
 
     match step.as_str() {
         "plan" => {
@@ -1049,7 +1056,7 @@ fn format_workflow_history_item_for_runs_show(item: &serde_json::Value) -> Optio
                 .map(|value| value.to_string())
                 .unwrap_or_else(|| "false".to_string());
             Some(format!(
-                "review r{}: {decision} applyReady={apply_ready} blockers={} files={files}",
+                "review r{}: {decision} applyReady={apply_ready} blockers={} files={files}{blocker_sample}",
                 round.unwrap_or(1),
                 blockers
             ))
@@ -2779,7 +2786,9 @@ mod tests {
         assert!(view.contains("report.html"));
         assert!(view.contains("Workflow history:"));
         assert!(view.contains("plan: 2 task(s) alpha,beta"));
-        assert!(view.contains("review r1: reject applyReady=false blockers=1 files=2"));
+        assert!(
+            view.contains("review r1: reject applyReady=false blockers=1 files=2 — test failed")
+        );
         assert!(view.contains("repair plan r2: tasks=beta retained_files=1"));
         assert!(view.contains("review r2: approve applyReady=true blockers=0 files=2"));
         assert!(view.contains("verify: ok=true guard=true"));

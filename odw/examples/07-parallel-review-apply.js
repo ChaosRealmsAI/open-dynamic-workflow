@@ -52,6 +52,7 @@ export default async function workflow() {
   const strictTaskFileBoundaries = args?.strictTaskFileBoundaries !== false;
   const allowDirtyTaskFiles = args?.allowDirtyTaskFiles === true;
   const allowDuplicateTaskFiles = args?.allowDuplicateTaskFiles === true;
+  const allowUndeclaredTaskFiles = args?.allowUndeclaredTaskFiles === true;
 
   const taskIdEntries = TASKS.map((task, index) => ({
     index,
@@ -134,6 +135,31 @@ Constraints:
     }
     return [...new Set(files)];
   };
+
+  const undeclaredTaskFiles = TASKS
+    .map((task, index) => ({
+      index,
+      id: task.id,
+      files: taskFiles(task),
+    }))
+    .filter((entry) => entry.files.length === 0)
+    .map((entry) => ({
+      index: entry.index,
+      id: entry.id,
+    }));
+  if (!allowUndeclaredTaskFiles && undeclaredTaskFiles.length > 0) {
+    return {
+      ok: false,
+      error: {
+        category: "undeclared_task_files",
+        message:
+          "Every parallel task must declare task.file or task.files so ODW can enforce ownership and target repairs.",
+      },
+      undeclaredTaskFiles,
+      hint:
+        "Declare each task's owned files, split exploratory work into a planning step, or pass allowUndeclaredTaskFiles:true only with explicit owner intent.",
+    };
+  }
 
   const fileOwner = new Map();
   const fileOwners = new Map();

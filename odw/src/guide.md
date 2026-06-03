@@ -159,10 +159,13 @@ odw exec --script wf.js --backend pandacode --json
   those unapproved changes and fails instead of silently bypassing review.
   Every task must declare a stable unique `id`; ODW uses it for node keys,
   sessions, repair history, and reports.
-  By default each task is expected to stay inside `task.file` / `task.files`;
-  failed implementation nodes or cross-owned file edits are repaired before any
-  review/apply gate runs. Set `strictTaskFileBoundaries:false` only when the
-  owner explicitly wants cross-file task overlap.
+  By default each task must declare ownership with `task.file` / `task.files`
+  and stay inside that declared file list; failed implementation nodes or
+  cross-owned file edits are repaired before any review/apply gate runs. Use a
+  separate planning step for exploratory work, or pass
+  `allowUndeclaredTaskFiles:true` only when the owner explicitly accepts weaker
+  ownership checks. Set `strictTaskFileBoundaries:false` only when the owner
+  explicitly wants cross-file task overlap.
   Because isolated worktrees branch from `HEAD`, the starter also refuses to run
   when declared task files already have uncommitted changes; commit/stash them
   first, or pass `allowDirtyTaskFiles:true` only when the owner accepts that

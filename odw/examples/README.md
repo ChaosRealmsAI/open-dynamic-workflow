@@ -40,8 +40,10 @@ restored from the pre-verification snapshot.
 Each task must declare a stable unique `id`; ODW uses task ids for node keys,
 sessions, repair history, and reports.
 Before review, it also blocks failed implementation nodes and cross-owned file
-edits. Declare one `task.file` or multiple `task.files` for each task; set
-`strictTaskFileBoundaries:false` only with explicit owner intent.
+edits. Declare one `task.file` or multiple `task.files` for each task. Use a
+separate planning step for exploratory work, or set
+`allowUndeclaredTaskFiles:true` only when the owner accepts weaker ownership
+checks. Set `strictTaskFileBoundaries:false` only with explicit owner intent.
 Because isolated worktrees branch from `HEAD`, it also blocks dirty declared
 task files before implementation; commit/stash them first, or set
 `allowDirtyTaskFiles:true` only when the owner accepts that workers will not see

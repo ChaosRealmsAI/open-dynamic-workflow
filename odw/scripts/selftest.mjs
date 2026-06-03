@@ -1462,6 +1462,31 @@ test("examples: parallel-review-apply blocks missing or duplicate task ids befor
   }
 });
 
+test("examples: parallel-review-apply blocks undeclared task file ownership before worktrees", () => {
+  const { dir } = makeGitRepo("odw-example-07-undeclared-files-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('undeclared file guard')\"",
+      tasks: [
+        { id: "explore", prompt: "Find and edit whatever files are needed." },
+        { id: "docs", file: "docs/owned.md", prompt: "Create docs/owned.md." }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code !== 0, "starter should fail before worktrees when task file ownership is undeclared");
+    const result = r.state.result;
+    assert(result?.error?.category === "undeclared_task_files", `wrong undeclared-file error: ${JSON.stringify(result?.error)}`);
+    assert(result?.undeclaredTaskFiles?.[0]?.id === "explore", `undeclared task id not reported: ${JSON.stringify(result)}`);
+    assert(result?.undeclaredTaskFiles?.[0]?.index === 0, `undeclared task index not reported: ${JSON.stringify(result)}`);
+    assert(ev(r.events, "worktree_start").length === 0, "undeclared-file guard should not create implementation worktrees");
+    assert(ev(r.events, "worktree_review_gate").length === 0, "undeclared-file guard should not run review gate");
+    assert(ev(r.events, "worktree_patch_apply").length === 0, "undeclared-file guard should not apply patches");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply fails if final verification mutates cwd", () => {
   const { dir } = makeGitRepo("odw-example-07-verify-guard-");
   try {
@@ -1498,6 +1523,7 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
   assert(/history/.test(starter.out) && /repair_plan/.test(starter.out), "starter output missing review/repair history");
   assert(/pre_review_block/.test(starter.out) && /strictTaskFileBoundaries/.test(starter.out), "starter output missing pre-review implementation gate");
   assert(/invalid_task_ids/.test(starter.out) && /stable unique id/.test(starter.out), "starter output missing task id guard");
+  assert(/undeclared_task_files/.test(starter.out) && /allowUndeclaredTaskFiles/.test(starter.out), "starter output missing undeclared task-file guard");
   assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
   assert(/duplicate_task_files/.test(starter.out) && /allowDuplicateTaskFiles/.test(starter.out), "starter output missing duplicate task-file guard");
   assert(/captureMainWorktreeSnapshot/.test(starter.out) && /permission: "limited"/.test(starter.out), "starter output missing read-only final verification guard");

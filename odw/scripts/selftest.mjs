@@ -1602,6 +1602,7 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
   assert(/undeclared_task_files/.test(starter.out) && /allowUndeclaredTaskFiles/.test(starter.out), "starter output missing undeclared task-file guard");
   assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
   assert(/duplicate_task_files/.test(starter.out) && /allowDuplicateTaskFiles/.test(starter.out), "starter output missing duplicate task-file guard");
+  assert(/Planned task contracts/.test(starter.out) && /Current task/.test(starter.out), "starter output missing shared task context injection");
   assert(/Do not invent package entrypoints/.test(starter.out) && /do not skip tests/.test(starter.out), "starter output missing tests/docs ownership guard");
   assert(/captureMainWorktreeSnapshot/.test(starter.out) && /permission: "limited"/.test(starter.out), "starter output missing read-only final verification guard");
   const { dir } = makeGitRepo("odw-starter-cli-");

@@ -53,6 +53,10 @@ Test and documentation tasks should target the declared files and exports from
 the planned task set. If a required public entrypoint is missing from task
 ownership, treat it as a planning blocker or add it to a task; do not invent
 undeclared entrypoints or skip tests to make isolated verification pass.
+The starter injects the run context and full planned task list into every
+implementation/repair prompt, so tests, docs, entrypoints, and implementation
+modules can align on one shared contract even though they run in isolated
+worktrees.
 Because isolated worktrees branch from `HEAD`, it also blocks dirty declared
 task files before implementation; commit/stash them first, or set
 `allowDirtyTaskFiles:true` only when the owner accepts that workers will not see

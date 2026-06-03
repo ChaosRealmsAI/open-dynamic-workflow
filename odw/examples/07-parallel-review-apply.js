@@ -220,7 +220,14 @@ ${taskBrief}`;
     "Reject when there are blockers, failed verification, semantic conflicts, or unsafe/unrelated edits.",
   ];
 
-  const implementationPrompt = (task, repairFeedback) => `${task.prompt}
+  const implementationPrompt = (task, repairFeedback) => `Batch context:
+${runContext}
+
+Planned task contracts:
+${taskBrief}
+
+Current task (${task.id}):
+${task.prompt}
 
 ${repairFeedback ? `Review feedback to address before returning:\n${repairFeedback}
 
@@ -229,6 +236,7 @@ When feedback references files owned by other tasks, treat those references as e
 Constraints:
 - Only edit the files needed for this task${taskFiles(task).length ? `: ${taskFiles(task).join(", ")}` : ""}.
 - Keep the change independently reviewable.
+- Align this task with the run context and sibling task contracts above; do not invent a different public API, data shape, file name, or acceptance contract.
 - Tests and docs must target the declared task files and exports from the planned tasks. Do not invent package entrypoints, public modules, or skip paths unless that file is declared in a task's ownership list.
 - If verification cannot pass in this isolated worktree because dependent task files are absent, still write the real intended tests/docs and report that dependency honestly; do not skip tests to make verification pass.
 - Do not claim defaults or generated files that are not directly true from the task context or project evidence.

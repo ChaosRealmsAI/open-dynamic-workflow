@@ -1913,8 +1913,18 @@ fn summarize_script_event(value: &serde_json::Value) -> String {
                 .unwrap_or(false);
             let files = value.get("files").and_then(|f| f.as_u64()).unwrap_or(0);
             let reviewers = value.get("reviewers").and_then(|f| f.as_u64()).unwrap_or(0);
+            let preflight = json_string(value, "preflight_category")
+                .or_else(|| json_string(value, "category"))
+                .map(|category| {
+                    let message = json_string(value, "preflight_message")
+                        .or_else(|| json_string(value, "message"))
+                        .map(|message| format!(" message={}", truncate(&message, 160)))
+                        .unwrap_or_default();
+                    format!(" category={category}{message}")
+                })
+                .unwrap_or_default();
             format!(
-                "[worktree] review {label} decision={decision} ok={ok} files={files} reviewers={reviewers}"
+                "[worktree] review {label} decision={decision} ok={ok} files={files} reviewers={reviewers}{preflight}"
             )
         }
         Some("worktree_review_workspace") => {
@@ -2653,6 +2663,7 @@ mod tests {
                 r#"{"type":"launch"}"#,
                 r#"{"raw":{"type":"codex_poll","key":"active-node","last_agent_message":"Older status"},"summary":"[event] codex_poll"}"#,
                 r#"{"raw":{"type":"codex_poll","key":"active-node","last_agent_message":"Latest active status"},"summary":"[event] codex_poll"}"#,
+                r#"{"raw":{"type":"worktree_review_gate","label":"batch-review-r1","ok":false,"decision":"reject","files":2,"reviewers":0,"preflight_category":"patch_conflict","preflight_message":"error: patch failed: same.txt:1\nerror: same.txt: patch does not apply","blockers":1},"summary":"[event] worktree_review_gate"}"#,
                 r#"{"type":"workflow_done","name":"test-flow","result":{"ok":true,"gate":{"decision":"approve","applyReady":true},"landed":{"applied":4,"failed":0},"verifyGuard":{"ok":true},"verification":["long evidence that should stay out of the compact runs show view"]}}"#,
                 r#"{"type":"exit","status":"completed"}"#,
             ]
@@ -2772,6 +2783,7 @@ mod tests {
         assert!(view.contains("repair plan r2: tasks=beta retained_files=1"));
         assert!(view.contains("review r2: approve applyReady=true blockers=0 files=2"));
         assert!(view.contains("verify: ok=true guard=true"));
+        assert!(view.contains("[worktree] review batch-review-r1 decision=reject ok=false files=2 reviewers=0 category=patch_conflict message=error: patch failed: same.txt:1\\nerror: same.txt: patch does not apply"));
         assert!(
             view.contains(
                 "[workflow] done test-flow result ok=true decision=approve applyReady=true applied=4 failed=0 verifyGuard=true"

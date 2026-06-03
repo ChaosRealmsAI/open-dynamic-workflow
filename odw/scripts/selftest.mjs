@@ -472,11 +472,13 @@ test("worktree: review gate rejects patch conflicts before reviewer agents", () 
     const r = run(`export const meta={name:"wreviewconflict"};
 phase("P","");
 const gate = await reviewWorktreeDiffs([{ changed:true, files:["same.txt"], diff:${JSON.stringify(diff)} }], { label:"gate-conflict", reviewerCount:2 });
-log("GATE_CONFLICT decision="+gate.decision+" ok="+gate.ok+" preflight="+gate.preflight.category+" reviewers="+gate.reviews.length);
-return { ok: gate.ok === false && gate.decision === "reject" && gate.preflight.category === "patch_conflict" && gate.reviews.length === 0 };`, { cwd: dir });
+log("GATE_CONFLICT decision="+gate.decision+" ok="+gate.ok+" preflight="+gate.preflight.category+" blockers="+gate.blockers.length+" reviewers="+gate.reviews.length);
+return { ok: gate.ok === false && gate.decision === "reject" && gate.preflight.category === "patch_conflict" && gate.blockers.length > 0 && gate.reviews.length === 0 };`, { cwd: dir });
     assert(r.code === 0, `review conflict workflow failed: ${r.out.slice(-500)}`);
-    assert(/GATE_CONFLICT decision=reject ok=false preflight=patch_conflict reviewers=0/.test(r.out), `conflict gate wrong: ${r.out.slice(-500)}`);
+    assert(/GATE_CONFLICT decision=reject ok=false preflight=patch_conflict blockers=[1-9] reviewers=0/.test(r.out), `conflict gate wrong: ${r.out.slice(-500)}`);
     assert(readFileSync(join(dir, "same.txt"), "utf8") === "main\n", "review conflict preflight mutated cwd");
+    const gateEvents = ev(r.events, "worktree_review_gate");
+    assert(gateEvents.some((e) => e.decision === "reject" && e.blockers > 0 && e.preflight_category === "patch_conflict" && /patch does not apply/.test(e.preflight_message || "")), `missing conflict preflight event detail: ${JSON.stringify(gateEvents)}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

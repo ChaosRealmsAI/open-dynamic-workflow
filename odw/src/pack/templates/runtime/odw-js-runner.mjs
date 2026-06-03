@@ -1604,6 +1604,31 @@ function worktreePatchBatchResult(results) {
   };
 }
 
+function preflightRejectGate({ files, category, message }) {
+  const preflightCategory = firstText(typeof category === "string" ? category : "", "preflight_failed");
+  const preflightMessage = firstText(
+    typeof message === "string" ? message : String(message ?? ""),
+    preflightCategory
+  );
+  const blocker = truncateText(`${preflightCategory}: ${preflightMessage}`, 1200);
+  return {
+    ok: false,
+    decision: "reject",
+    applyReady: false,
+    files,
+    preflight: {
+      ok: false,
+      category: preflightCategory,
+      message: preflightMessage
+    },
+    reviews: [],
+    blockers: [blocker],
+    risks: [],
+    owner_questions: [],
+    verification: [blocker]
+  };
+}
+
 async function reviewCapturedWorktreeDiffs(candidates, options = {}) {
   const list = Array.isArray(candidates) ? candidates : [candidates];
   const label = options.label || "worktree-review";
@@ -1611,18 +1636,11 @@ async function reviewCapturedWorktreeDiffs(candidates, options = {}) {
   const invalid = prepared.filter((entry) => entry.result?.ok === false);
   const files = uniqueStrings(prepared.flatMap((entry) => entry.files));
   if (invalid.length > 0) {
-    const gate = {
-      ok: false,
-      decision: "reject",
-      applyReady: false,
+    const gate = preflightRejectGate({
       files,
-      preflight: {
-        ok: false,
-        category: "invalid_worktree_diff",
-        message: "One or more candidates are not captured worktree diffs."
-      },
-      reviews: []
-    };
+      category: "invalid_worktree_diff",
+      message: "One or more candidates are not captured worktree diffs."
+    });
     emitWorktreeReviewGate(label, gate);
     return gate;
   }
@@ -1644,18 +1662,11 @@ async function reviewCapturedWorktreeDiffs(candidates, options = {}) {
   const combinedDiff = combinedWorktreeDiff(changed);
   const check = runGitApply(["apply", "--check", "--whitespace=nowarn"], combinedDiff);
   if (!check.ok) {
-    const gate = {
-      ok: false,
-      decision: "reject",
-      applyReady: false,
+    const gate = preflightRejectGate({
       files,
-      preflight: {
-        ok: false,
-        category: "patch_conflict",
-        message: check.message
-      },
-      reviews: []
-    };
+      category: "patch_conflict",
+      message: check.message
+    });
     emitWorktreeReviewGate(label, gate);
     return gate;
   }
@@ -1666,35 +1677,21 @@ async function reviewCapturedWorktreeDiffs(candidates, options = {}) {
     try {
       reviewWorktree = createWorktree(cwd, { id: `${label}-candidate`, label: `${label}-candidate` });
     } catch (error) {
-      const gate = {
-        ok: false,
-        decision: "reject",
-        applyReady: false,
+      const gate = preflightRejectGate({
         files,
-        preflight: {
-          ok: false,
-          category: "review_workspace_failed",
-          message: String(error?.message ?? error)
-        },
-        reviews: []
-      };
+        category: "review_workspace_failed",
+        message: String(error?.message ?? error)
+      });
       emitWorktreeReviewGate(label, gate);
       return gate;
     }
     const reviewApply = runGitApplyIn(reviewWorktree.dir, ["apply", "--whitespace=nowarn"], combinedDiff);
     if (!reviewApply.ok) {
-      const gate = {
-        ok: false,
-        decision: "reject",
-        applyReady: false,
+      const gate = preflightRejectGate({
         files,
-        preflight: {
-          ok: false,
-          category: "review_workspace_failed",
-          message: reviewApply.message
-        },
-        reviews: []
-      };
+        category: "review_workspace_failed",
+        message: reviewApply.message
+      });
       emitWorktreeReviewGate(label, gate);
       return gate;
     }
@@ -1890,7 +1887,7 @@ function aggregateWorktreeReviewGate({ files, reviews }) {
 }
 
 function emitWorktreeReviewGate(label, gate) {
-  emit({
+  const event = {
     type: "worktree_review_gate",
     label,
     ok: gate.ok === true,
@@ -1911,7 +1908,14 @@ function emitWorktreeReviewGate(label, gate) {
     owner_questions: Array.isArray(gate.owner_questions) ? gate.owner_questions.length : 0,
     owner_question_samples: previewStrings(gate.owner_questions, 5, 500),
     verification_samples: previewStrings(gate.verification, 5, 500)
-  });
+  };
+  if (gate.preflight?.ok === false) {
+    event.preflight_category = firstText(gate.preflight.category, "preflight_failed");
+    event.preflight_message = truncateText(firstText(gate.preflight.message, event.preflight_category), 500);
+    event.category = event.preflight_category;
+    event.message = event.preflight_message;
+  }
+  emit(event);
 }
 
 function stringArray(value) {

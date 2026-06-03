@@ -173,6 +173,13 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
     };
     session::save(&root, &mut record)?;
 
+    // Reap the per-session daemon once the session is terminal. Without this
+    // each finished node leaves a codexctl daemon + codex child resident; see
+    // stop_codex_daemon / session_is_terminal.
+    if session_is_terminal(&record, &state) {
+        stop_codex_daemon(&args.bins, &control);
+    }
+
     let mut report = json!({
         "ok": ok,
         "runtime": RUNTIME,
@@ -220,21 +227,33 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         prompt_file.clone()
     };
     let control = record_codex_control(&root, &record)?;
-    let run_id = if let Some(run_id) = &record.run_id {
-        run_id.clone()
-    } else if let Some(thread_id) = &record.thread_id {
-        let resume = codex_resume_command(
-            &args.bins, thread_id, &root, &control, &model, &effort, permission,
-        );
-        let output = run_capture(&resume, Some(&root))?;
-        let raw = parse_json_or_null(&output.stdout);
-        update_record_ids(&mut record, raw.as_ref());
-        require_run_id(&record)?
-    } else {
-        bail!(
-            "codex session {} has neither run_id nor thread_id",
+    // Resolve a LIVE run for this session, mirroring the daemon-reap rule:
+    //  - A parked (needs_input) session was deliberately NOT reaped, so its run
+    //    is still live — continue it directly. Resurrecting would fork a fresh
+    //    run from the rollout and abandon the parked turn.
+    //  - Any other session's daemon was reaped on idle/terminal, so the recorded
+    //    run_id is dead. Resurrect the thread from codex's persisted rollout
+    //    (thread_id) to get a fresh run_id used consistently for send AND execute.
+    //  - With no thread to resurrect, the bare run_id is the last resort.
+    let run_id = match (
+        pending_stage(&record).is_some(),
+        record.run_id.clone(),
+        record.thread_id.clone(),
+    ) {
+        (true, Some(run_id), _) => run_id,
+        (_, _, Some(thread_id)) => {
+            let resume = codex_resume_command(
+                &args.bins, &thread_id, &root, &control, &model, &effort, permission,
+            );
+            let output = run_capture(&resume, Some(&root))?;
+            update_record_ids(&mut record, parse_json_or_null(&output.stdout).as_ref());
+            require_run_id(&record)?
+        }
+        (_, Some(run_id), None) => run_id,
+        (_, None, None) => bail!(
+            "codex session {} has neither thread_id nor run_id",
             record.session
-        );
+        ),
     };
     let command = codex_send_command(
         &args.bins,
@@ -317,6 +336,9 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         )
     };
     session::save(&root, &mut record)?;
+    if session_is_terminal(&record, &state) {
+        stop_codex_daemon(&args.bins, &control);
+    }
     let mut report = json!({
         "ok": ok,
         "runtime": RUNTIME,
@@ -395,6 +417,9 @@ fn answer(args: AnswerCommandArgs) -> Result<()> {
     }
 
     session::save(&root, &mut record)?;
+    if session_is_terminal(&record, &state) {
+        stop_codex_daemon(&args.bins, &control);
+    }
     let mut report = json!({
         "ok": ok,
         "runtime": RUNTIME,
@@ -1090,6 +1115,34 @@ fn push_control(command: &mut Vec<String>, control: &CodexControl, log_mode: &st
     ]);
 }
 
+/// Best-effort stop the per-session codexctl daemon once a session reaches a
+/// terminal state. codexctl lazily spawns one `daemon serve` per session socket
+/// and never stops it on its own, so each finished node otherwise leaves a
+/// daemon (and its codex child) resident until codexctl's idle-timeout reaps it.
+/// Skipped while a session is pending (needs_input), since answer/resume reuse
+/// the same socket.
+fn stop_daemon_command(bins: &RuntimeBins, control: &CodexControl) -> Vec<String> {
+    vec![
+        bins.codexctl_bin.clone(),
+        "--session-socket".to_string(),
+        control.session_socket.to_string_lossy().to_string(),
+        "daemon".to_string(),
+        "stop".to_string(),
+    ]
+}
+
+fn stop_codex_daemon(bins: &RuntimeBins, control: &CodexControl) {
+    let _ = run_capture(&stop_daemon_command(bins, control), None);
+}
+
+/// A session is safe to tear down (stop its daemon) only when it has reached a
+/// terminal state — not awaiting input (`pending_stage`) and not still running
+/// asynchronously (`state == "running"`, e.g. an `answer --no-wait`). Stopping
+/// otherwise would orphan a resume/answer continuation or a detached run.
+fn session_is_terminal(record: &SessionRecord, state: &str) -> bool {
+    pending_stage(record).is_none() && state != "running"
+}
+
 fn new_codex_control(root: &Path, session: &str) -> Result<CodexControl> {
     let dir = codex_control_dir(root, session);
     let log_dir = dir.join("logs");
@@ -1200,6 +1253,18 @@ mod tests {
         assert!(command.contains(&"--dangerously-full-access".to_string()));
         assert!(command.contains(&"gpt-5.5".to_string()));
         assert!(command.contains(&"xhigh".to_string()));
+    }
+
+    #[test]
+    fn builds_daemon_stop_command() {
+        let control = CodexControl {
+            log_dir: PathBuf::from("/repo/.pandacode/codex/runs/s1/logs"),
+            session_socket: PathBuf::from("/tmp/pandacode-codex/s1.sock"),
+        };
+        let command = stop_daemon_command(&bins(), &control);
+        assert!(command.windows(2).any(|pair| pair == ["daemon", "stop"]));
+        assert!(command.contains(&"--session-socket".to_string()));
+        assert!(command.contains(&"/tmp/pandacode-codex/s1.sock".to_string()));
     }
 
     #[test]

@@ -7,7 +7,7 @@
 export interface WorkflowMeta {
   name: string;
   description?: string;
-  /** When this workflow should be used (shown in the saved-workflow list). */
+  /** When this workflow should be used (emitted as metadata for callers/tools). */
   whenToUse?: string;
   /**
    * Phase declarations. `model` lets a phase set a default model that its
@@ -44,8 +44,8 @@ export interface AgentOptions {
    * agents that mutate files in parallel do not conflict. The worktree is
    * removed when the node finishes (success, error, or timeout); the agent's
    * changes are returned in `result.worktree` as a diff. Requires cwd to be a
-   * git repository. NOTE: a worktree only contains COMMITTED files, so commit or
-   * stage any input files (specs, fixtures) the agent must read before running.
+   * git repository. NOTE: a worktree only contains COMMITTED files, so commit
+   * any input files (specs, fixtures) the agent must read before running.
    */
   isolation?: "worktree";
   /**
@@ -100,6 +100,146 @@ export interface ParallelOptions {
   phase?: string;
   max?: number;
   concurrency?: number;
+}
+
+export interface WorktreeDiff {
+  changed: boolean;
+  files: string[];
+  diff: string;
+  /** Commit SHA the isolated worktree was created from, when available. */
+  base?: string | null;
+  error?: string;
+}
+
+export type WorktreeDiffCandidate = WorktreeDiff | { worktree?: WorktreeDiff | null };
+
+export type WorktreePatchApplyErrorCategory =
+  | "invalid_worktree_diff"
+  | "batch_preflight_failed"
+  | "patch_conflict"
+  | "patch_apply_failed";
+
+export interface WorktreePatchApplyResult {
+  ok: boolean;
+  applied: boolean;
+  files: string[];
+  base?: string | null;
+  changed?: boolean;
+  error?: {
+    category: WorktreePatchApplyErrorCategory;
+    message: string;
+  };
+}
+
+export interface WorktreePatchApplyOptions {
+  label?: string;
+  /**
+   * Batch only: opt into partial landing. By default `applyWorktreeDiffs`
+   * preflights the whole batch and applies it as one patch, so a conflict leaves
+   * the main cwd untouched.
+   */
+  continueOnError?: boolean;
+}
+
+export interface WorktreePatchBatchResult {
+  ok: boolean;
+  applied: number;
+  failed: number;
+  partial: boolean;
+  results: WorktreePatchApplyResult[];
+}
+
+export interface MainWorktreeSnapshot {
+  ok: boolean;
+  label?: string;
+  files: string[];
+  hashes: Record<string, string | null>;
+  contents: Record<string, string | null>;
+  error?: string;
+}
+
+export interface MainWorktreeUnchangedResult {
+  ok: boolean;
+  label: string;
+  before_files: number;
+  after_files: number;
+  added: string[];
+  removed: string[];
+  modified: string[];
+  files: string[];
+  error?: string;
+}
+
+export interface MainWorktreeRestoreResult {
+  ok: boolean;
+  label: string;
+  restored: string[];
+  removed: string[];
+  errors: string[];
+  after: MainWorktreeUnchangedResult;
+}
+
+export type WorktreeReviewDecision = "approve" | "reject" | "needs_owner";
+
+export interface WorktreeReviewReviewer {
+  id?: string;
+  label?: string;
+  runtime?: "claude" | "codex" | "bamboo" | string;
+  provider?: string;
+  model?: string;
+  effort?: string;
+  timeout?: string;
+  permission?: "limited" | "max";
+  perspective?: string;
+  retry?: AgentOptions["retry"];
+}
+
+export interface WorktreeReviewOptions {
+  label?: string;
+  phase?: string;
+  context?: string;
+  criteria?: string[];
+  runtime?: "claude" | "codex" | "bamboo" | string;
+  provider?: string;
+  model?: string;
+  effort?: string;
+  timeout?: string;
+  permission?: "limited" | "max";
+  reviewerCount?: number;
+  maxReviewers?: number;
+  maxDiffChars?: number;
+  reviewers?: Array<WorktreeReviewReviewer | string>;
+  retry?: AgentOptions["retry"];
+}
+
+export interface WorktreeReviewResult {
+  reviewer: string;
+  decision: WorktreeReviewDecision;
+  summary: string;
+  blockers: string[];
+  risks: string[];
+  owner_questions: string[];
+  verification: string[];
+  files_reviewed: string[];
+}
+
+export interface WorktreeReviewGateResult {
+  /** True only when `decision === "approve"` and the batch can proceed. */
+  ok: boolean;
+  decision: WorktreeReviewDecision;
+  applyReady: boolean;
+  files: string[];
+  preflight: {
+    ok: boolean;
+    changed?: boolean;
+    category?: "invalid_worktree_diff" | "patch_conflict" | "review_workspace_failed";
+    message?: string;
+  };
+  reviews: WorktreeReviewResult[];
+  blockers?: string[];
+  risks?: string[];
+  owner_questions?: string[];
+  verification?: string[];
 }
 
 export interface WorkflowBudget {
@@ -202,6 +342,69 @@ export declare function parallel<T = unknown>(
   thunks: Array<(index: number) => Promise<T>>,
   options?: ParallelOptions
 ): Promise<T[]>;
+
+/**
+ * Apply a captured `result.worktree` patch back into the main cwd. The runner
+ * first performs `git apply --check`; conflicts return
+ * `{ ok:false, error:{ category:"patch_conflict" } }` without mutating files.
+ */
+export declare function applyWorktreeDiff(
+  candidate: WorktreeDiffCandidate,
+  options?: WorktreePatchApplyOptions
+): WorktreePatchApplyResult;
+
+/**
+ * Apply multiple captured worktree patches. By default this is atomic at the
+ * workflow level: the runner checks the combined patch first, then applies it as
+ * one patch; if any patch conflicts, no patch is written to cwd. Set
+ * `continueOnError:true` only when partial landing is intentional.
+ */
+export declare function applyWorktreeDiffs(
+  candidates: WorktreeDiffCandidate[] | WorktreeDiffCandidate,
+  options?: WorktreePatchApplyOptions
+): WorktreePatchBatchResult;
+
+/**
+ * Review captured worktree patches before landing. The gate first preflights
+ * the combined patch without mutating cwd, then applies the patch to a temporary
+ * candidate worktree and runs one or more reviewer agents there with a
+ * structured verdict schema. Only `decision:"approve"` returns `ok:true` /
+ * `applyReady:true`; `reject` and `needs_owner` both block automatic apply.
+ */
+export declare function reviewWorktreeDiffs(
+  candidates: WorktreeDiffCandidate[] | WorktreeDiffCandidate,
+  options?: WorktreeReviewOptions
+): Promise<WorktreeReviewGateResult>;
+
+/**
+ * Capture the current main cwd's changed-file content hashes without staging or
+ * mutating git state. Useful for read-only verification guards after an
+ * approve-only apply.
+ */
+export declare function captureMainWorktreeSnapshot(options?: {
+  label?: string;
+}): MainWorktreeSnapshot;
+
+/**
+ * Compare the current main cwd against a prior snapshot and emit a
+ * `worktree_snapshot_check` event. Returns ok:false if verification or any
+ * other node changed files after the snapshot.
+ */
+export declare function assertMainWorktreeUnchanged(
+  snapshot: MainWorktreeSnapshot,
+  options?: { label?: string }
+): MainWorktreeUnchangedResult;
+
+/**
+ * Restore the main cwd back to a prior snapshot for files changed after that
+ * snapshot. Added files are removed; modified/removed snapshot files are
+ * rewritten from the snapshot contents. Emits `worktree_snapshot_restore`.
+ */
+export declare function restoreMainWorktreeSnapshot(
+  snapshot: MainWorktreeSnapshot,
+  check?: MainWorktreeUnchangedResult | null,
+  options?: { label?: string }
+): MainWorktreeRestoreResult;
 
 export declare function fanout<TItem = unknown, TResult = unknown>(
   items: TItem[],

@@ -64,7 +64,15 @@ function row(k,v,cls){return '<div class="k">'+k+'</div><div class="v'+(cls?' '+
 function detail(n){
  let h='<a class="back" onclick="showOverview()">‹ overview</a>';
  h+='<div class="dname">'+esc(n.label)+'</div>';
- h+='<div class="dkind">'+(n.kind==='ai'?'agent() node':'code')+(n.stage?' · '+esc(n.stage):'')+'</div>';
+ h+='<div class="dkind">'+(n.kind==='ai'?'agent() node':(n.kind==='event'?'workflow event':'code'))+(n.stage?' · '+esc(n.stage):'')+'</div>';
+ if(n.kind==='event'){
+   const ev=n.event||{};
+   let rows='';
+   for(const [k,v] of Object.entries(ev)){ rows+=row(k,typeof v==='object'?JSON.stringify(v):v,(k==='ok'&&v===false)?'fail':((k==='ok'||k==='applied'||k==='applyReady')&&v===true?'ok':'')); }
+   h+='<div class="lab">event</div><div class="kv">'+(rows||'<div class="k">—</div><div class="v">(empty)</div>')+'</div>';
+   if(n.raw) h+='<div class="lab">raw</div><div class="prompt">'+esc(JSON.stringify(n.raw,null,2))+'</div>';
+   return h;
+ }
  if(n.kind!=='ai'){h+='<div class="empty">Orchestration step (parallel / pipeline fan-out / join / start / end) — emitted by the workflow code, not an AI call.</div>';return h;}
  // config straight from the code
  const cfg=n.config||{};
@@ -90,11 +98,12 @@ function showOverview(){
  let h='<div class="dname">'+esc(o.name)+'</div><div class="dkind">'+esc(o.subtitle)+'</div>';
  h+='<div class="lab">run</div><div class="kv">'+
    row('backend',o.backend)+row('status',o.status,o.failed?'fail':'ok')+
-   row('agent nodes',num(o.ai))+row('total tokens',num(o.tokens)+(o.approx?' (≥)':''))+'</div>';
+   row('agent nodes',num(o.ai))+row('review gates',num(o.gates))+row('apply events',num(o.applies))+
+   row('total tokens',num(o.tokens)+(o.approx?' (≥)':''))+'</div>';
  if(o.modelTokens&&o.modelTokens.length){
    h+='<div class="lab" style="margin-top:22px">tokens by model</div><div class="kv">'+
      o.modelTokens.map(([m,t])=>row(m,num(t))).join('')+'</div>';}
- h+='<div class="lab" style="margin-top:22px">tip</div><div class="empty">Click any node to see its config and prompt as written in the workflow code.</div>';
+ h+='<div class="lab" style="margin-top:22px">tip</div><div class="empty">Click any agent, review gate, workspace, or apply node to inspect the exact runtime evidence.</div>';
  document.getElementById('detail').innerHTML=h;}
 function fitGraph(){const svg=document.querySelector('.graph svg'),g=document.querySelector('.graph');
  if(!svg||!g)return;const vb=svg.viewBox&&svg.viewBox.baseVal;if(!vb||!vb.width)return;
@@ -133,6 +142,55 @@ const nodes = {};
 const order = [];
 let codeSeq = 0;
 function addCode(id, label, term = false) { nodes[id] = { id, kind: "code", label, term }; order.push(id); return id; }
+function eventFields(ev) {
+  const fields = { type: ev.type };
+  for (const key of [
+    "label",
+    "status",
+    "decision",
+    "ok",
+    "applyReady",
+    "applied",
+    "files",
+    "file_samples",
+    "reviewers",
+    "review_decisions",
+    "blockers",
+    "blocker_samples",
+    "risks",
+    "risk_samples",
+    "owner_questions",
+    "owner_question_samples",
+    "verification_samples",
+    "added",
+    "removed",
+    "modified",
+    "restored",
+    "category",
+    "message"
+  ]) {
+    if (ev[key] !== undefined) fields[key] = ev[key];
+  }
+  return fields;
+}
+function addEvent(label, ev) {
+  codeSeq += 1;
+  const id = `event${codeSeq}`;
+  nodes[id] = {
+    id,
+    kind: "event",
+    label,
+    eventType: ev.type,
+    event: eventFields(ev),
+    raw: ev,
+    ok: ev.ok,
+    status: ev.ok === false ? "failed" : "ok"
+  };
+  order.push(id);
+  link(tail, id);
+  tail = id;
+  return id;
+}
 const startId = addCode("start", "start", true);
 const edges = [];
 const link = (a, b) => { if (a && b) edges.push([a, b]); };
@@ -174,6 +232,20 @@ for (const ev of events) {
   } else if (t === "agent_skip") {
     if (!nodes[ev.key]) { nodes[ev.key] = { id: ev.key, kind: "ai", label: ev.label || ev.key, stage: ev.phase || "", config: ev.config || {}, prompt: "", status: "skip", tokens: null, durationMs: null }; order.push(ev.key); const g = groups[groups.length - 1]; if (g) { link(g.forkId, ev.key); g.children.push(ev.key); } else { link(tail, ev.key); tail = ev.key; } }
     else nodes[ev.key].status = "skip";
+  } else if (t === "worktree_review_workspace") {
+    addEvent(`review workspace ${ev.status || ""}`.trim(), ev);
+  } else if (t === "worktree_review_gate") {
+    addEvent(`gate: ${ev.decision || "review"}`, ev);
+  } else if (t === "worktree_patch_apply") {
+    const suffix = ev.applied ? "applied" : (ev.ok === false ? "failed" : "checked");
+    addEvent(`apply ${suffix}`, ev);
+  } else if (t === "worktree_snapshot_check") {
+    addEvent(`snapshot: ${ev.ok === false ? "changed" : "clean"}`, ev);
+  } else if (t === "worktree_snapshot_restore") {
+    addEvent(`snapshot restore: ${ev.ok === false ? "failed" : "ok"}`, ev);
+  } else if (t === "log") {
+    const message = String(ev.message || "").trim();
+    addEvent(`log: ${message.slice(0, 32) || "message"}`, ev);
   }
 }
 const endId = addCode("end", "end", true);
@@ -204,7 +276,10 @@ const modelTokens = Object.entries(byModel).filter(([, t]) => t > 0).sort((a, b)
 // always adds up to "total tokens" instead of silently falling short.
 const attributed = modelTokens.reduce((s, [, t]) => s + t, 0);
 if (totalTokens > attributed) modelTokens.push(["other (retries/overhead)", totalTokens - attributed]);
-const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: Boolean(wfErr) || aiNodes.some((n) => n.status === "failed"), ai: aiNodes.length, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx), modelTokens };
+const eventNodes = order.map((id) => nodes[id]).filter((n) => n.kind === "event");
+const reviewGateCount = eventNodes.filter((n) => n.eventType === "worktree_review_gate").length;
+const applyEventCount = eventNodes.filter((n) => n.eventType === "worktree_patch_apply").length;
+const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: Boolean(wfErr) || aiNodes.some((n) => n.status === "failed") || eventNodes.some((n) => n.ok === false), ai: aiNodes.length, gates: reviewGateCount, applies: applyEventCount, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx), modelTokens };
 
 // ---- mermaid (uncoloured) -------------------------------------------------
 const safe = (id) => "n_" + String(id).replace(/[^a-zA-Z0-9_]/g, "_");
@@ -214,12 +289,19 @@ function mermaid() {
     const n = nodes[id];
     const lbl = String(n.label).replace(/"/g, "”").slice(0, 24);
     const shape = n.term ? `(["${lbl}"])` : (n.kind === "code" ? `{"${lbl}"}` : `("${lbl}")`);
-    const cls = n.kind === "ai" ? (n.status === "failed" ? "fail" : "node") : "code";
+    const cls = n.kind === "ai"
+      ? (n.status === "failed" ? "fail" : "node")
+      : (n.kind === "event"
+        ? (n.ok === false ? "fail" : (n.eventType === "worktree_review_gate" ? "gate" : (n.eventType === "worktree_patch_apply" ? "apply" : "event")))
+        : "code");
     L.push(`  ${safe(id)}${shape}:::${cls}`);
   }
   for (const [a, b] of edges) L.push(`  ${safe(a)} --> ${safe(b)}`);
   L.push("  classDef node fill:#161922,stroke:#586074,color:#e3e6ef,stroke-width:1.3px;");
   L.push("  classDef fail fill:#241317,stroke:#e0574b,color:#f3d2cf,stroke-width:1.3px;");
+  L.push("  classDef gate fill:#13201c,stroke:#35c79a,color:#d7fff2,stroke-width:1.35px;");
+  L.push("  classDef apply fill:#151d2d,stroke:#72a7ff,color:#e3efff,stroke-width:1.25px;");
+  L.push("  classDef event fill:#101825,stroke:#4a5366,color:#dbe2f0,stroke-width:1.15px;");
   L.push("  classDef code fill:#101218,stroke:#363a45,color:#9aa0b0,stroke-width:1.1px;");
   return L.join("\n");
 }
@@ -227,7 +309,7 @@ function mermaid() {
 const njson = {};
 for (const id of order) {
   const n = nodes[id];
-  njson[safe(id)] = { kind: n.kind, label: n.label, stage: n.stage, config: n.config || {}, prompt: n.prompt, status: n.status, tokens: n.tokens, durationMs: n.durationMs };
+  njson[safe(id)] = { kind: n.kind, label: n.label, stage: n.stage, config: n.config || {}, prompt: n.prompt, status: n.status, tokens: n.tokens, durationMs: n.durationMs, event: n.event, raw: n.raw };
 }
 
 const vendorRel = (file) => {

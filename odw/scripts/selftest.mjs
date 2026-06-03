@@ -5,7 +5,7 @@
 // accounting, nested workflow, per-phase model / whenToUse).
 //
 // Usage:
-//   node scripts/selftest.mjs            # uses ./target/debug/odw
+//   node scripts/selftest.mjs            # uses target/debug/odw (crate or workspace)
 //   ODW=/path/to/odw node scripts/selftest.mjs
 //
 // Exits 0 only if every assertion passes. Deterministic and token-free
@@ -18,8 +18,18 @@ import {
 import { tmpdir, cpus } from "node:os";
 import { join, resolve } from "node:path";
 
+function defaultOdwBin() {
+  for (const candidate of ["./target/debug/odw", "../target/debug/odw"]) {
+    const resolved = resolve(candidate);
+    if (existsSync(resolved)) {
+      return resolved;
+    }
+  }
+  return resolve("./target/debug/odw");
+}
+
 // Absolute so it still resolves when a test runs odw from another cwd.
-const ODW = resolve(process.env.ODW || "./target/debug/odw");
+const ODW = resolve(process.env.ODW || defaultOdwBin());
 const REPO = process.cwd();
 const EXPECTED_MAX = Math.max(1, Math.min(16, cpus().length - 2));
 
@@ -78,6 +88,22 @@ function runOdw(args, { cwd = REPO, env = {}, pandacodeBin = null } = {}) {
   }
   const r = spawnSync(ODW, args, { cwd, encoding: "utf8", env: childEnv });
   return { code: r.status ?? 1, out: (r.stdout || "") + (r.stderr || "") };
+}
+
+function makeGitRepo(prefix = "odw-selftest-git-") {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const git = (args) => {
+    const r = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    assert(r.status === 0, `git ${args.join(" ")} failed: ${(r.stdout || "")}${(r.stderr || "")}`);
+    return r;
+  };
+  git(["init", "-q"]);
+  git(["config", "user.email", "odw-selftest@example.invalid"]);
+  git(["config", "user.name", "ODW Selftest"]);
+  writeFileSync(join(dir, "README.md"), "# odw selftest\n");
+  git(["add", "."]);
+  git(["commit", "-q", "-m", "init"]);
+  return { dir, git };
 }
 
 const ev = (events, type) => events.filter((e) => e && e.type === type);
@@ -202,6 +228,250 @@ return {ok:true};`);
   assert(r.code === 0, `run failed: ${r.out.slice(-300)}`);
   assert(/WC changed=true files=selftest_change.txt diffhas=true/.test(r.out), `expected change capture: ${r.out.slice(-300)}`);
   assert(odwWorktreeLeftovers().length === 0, `dir not removed after capture:\n${odwWorktreeLeftovers().join("\n")}`);
+});
+
+test("worktree: captured parallel diffs can be applied back to cwd", () => {
+  const { dir } = makeGitRepo("odw-apply-ok-");
+  try {
+    const r = run(`export const meta={name:"wapply"};
+phase("P","");
+const results = await parallel([
+  () => agent("write a", { id:"a", label:"a", isolation:"worktree", mockWriteFile:"a.txt" }),
+  () => agent("write b", { id:"b", label:"b", isolation:"worktree", mockWriteFile:"b.txt" })
+]);
+const landed = applyWorktreeDiffs(results);
+log("APPLY ok="+landed.ok+" applied="+landed.applied+" failed="+landed.failed+" files="+landed.results.flatMap((r)=>r.files).join("|"));
+return { ok: landed.ok && landed.applied === 2 && landed.failed === 0 };`, { cwd: dir });
+    assert(r.code === 0, `apply run failed: ${r.out.slice(-500)}`);
+    assert(/APPLY ok=true applied=2 failed=0 files=a\.txt\|b\.txt/.test(r.out), `apply summary wrong: ${r.out.slice(-500)}`);
+    assert(readFileSync(join(dir, "a.txt"), "utf8").includes("mock change by a"), "a.txt was not applied to cwd");
+    assert(readFileSync(join(dir, "b.txt"), "utf8").includes("mock change by b"), "b.txt was not applied to cwd");
+    assert(ev(r.events, "worktree_patch_apply").filter((e) => e.ok && e.applied).length === 2, "missing successful apply events");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: patch conflict is structured and leaves cwd untouched", () => {
+  const { dir, git } = makeGitRepo("odw-apply-conflict-");
+  try {
+    writeFileSync(join(dir, "same.txt"), "base\n");
+    git(["add", "same.txt"]);
+    git(["commit", "-q", "-m", "same-base"]);
+    writeFileSync(join(dir, "same.txt"), "main\n");
+    const diff = `diff --git a/same.txt b/same.txt
+--- a/same.txt
++++ b/same.txt
+@@ -1 +1 @@
+-base
++branch
+`;
+    const r = run(`export const meta={name:"wconflict"};
+phase("P","");
+const res = applyWorktreeDiff({ changed:true, files:["same.txt"], diff:${JSON.stringify(diff)} }, { label:"conflict" });
+log("CONFLICT ok="+res.ok+" applied="+res.applied+" cat="+res.error?.category);
+return { ok: res.ok === false && res.applied === false && res.error?.category === "patch_conflict" };`, { cwd: dir });
+    assert(r.code === 0, `conflict workflow failed: ${r.out.slice(-500)}`);
+    assert(/CONFLICT ok=false applied=false cat=patch_conflict/.test(r.out), `conflict was not structured: ${r.out.slice(-500)}`);
+    assert(readFileSync(join(dir, "same.txt"), "utf8") === "main\n", "conflict apply mutated cwd");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: batch apply is atomic by default when one patch conflicts", () => {
+  const { dir, git } = makeGitRepo("odw-apply-atomic-");
+  try {
+    writeFileSync(join(dir, "same.txt"), "base\n");
+    git(["add", "same.txt"]);
+    git(["commit", "-q", "-m", "same-base"]);
+    writeFileSync(join(dir, "same.txt"), "main\n");
+    const diff = `diff --git a/same.txt b/same.txt
+--- a/same.txt
++++ b/same.txt
+@@ -1 +1 @@
+-base
++branch
+`;
+    const r = run(`export const meta={name:"watomic"};
+phase("P","");
+const add = await agent("write add", { id:"add", label:"add", isolation:"worktree", mockWriteFile:"atomic-add.txt" });
+const landed = applyWorktreeDiffs([add, { changed:true, files:["same.txt"], diff:${JSON.stringify(diff)} }], { label:"atomic" });
+log("ATOMIC ok="+landed.ok+" applied="+landed.applied+" failed="+landed.failed+" partial="+landed.partial);
+return { ok: landed.ok === false && landed.applied === 0 && landed.partial === false && landed.failed >= 1 };`, { cwd: dir });
+    assert(r.code === 0, `atomic workflow failed: ${r.out.slice(-500)}`);
+    assert(/ATOMIC ok=false applied=0 failed=\d+ partial=false/.test(r.out), `atomic result wrong: ${r.out.slice(-500)}`);
+    assert(!existsSync(join(dir, "atomic-add.txt")), "atomic batch created the first file before failing");
+    assert(readFileSync(join(dir, "same.txt"), "utf8") === "main\n", "atomic batch mutated conflicting file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: continueOnError explicitly allows partial batch apply", () => {
+  const { dir, git } = makeGitRepo("odw-apply-partial-");
+  try {
+    writeFileSync(join(dir, "same.txt"), "base\n");
+    git(["add", "same.txt"]);
+    git(["commit", "-q", "-m", "same-base"]);
+    writeFileSync(join(dir, "same.txt"), "main\n");
+    const diff = `diff --git a/same.txt b/same.txt
+--- a/same.txt
++++ b/same.txt
+@@ -1 +1 @@
+-base
++branch
+`;
+    const r = run(`export const meta={name:"wpartial"};
+phase("P","");
+const add = await agent("write add", { id:"add", label:"add", isolation:"worktree", mockWriteFile:"partial-add.txt" });
+const landed = applyWorktreeDiffs([add, { changed:true, files:["same.txt"], diff:${JSON.stringify(diff)} }], { label:"partial", continueOnError:true });
+log("PARTIAL ok="+landed.ok+" applied="+landed.applied+" failed="+landed.failed+" partial="+landed.partial);
+return { ok: landed.ok === false && landed.applied === 1 && landed.failed === 1 && landed.partial === true };`, { cwd: dir });
+    assert(r.code === 0, `partial workflow failed: ${r.out.slice(-500)}`);
+    assert(/PARTIAL ok=false applied=1 failed=1 partial=true/.test(r.out), `partial result wrong: ${r.out.slice(-500)}`);
+    assert(readFileSync(join(dir, "partial-add.txt"), "utf8").includes("mock change by add"), "continueOnError did not apply the first file");
+    assert(readFileSync(join(dir, "same.txt"), "utf8") === "main\n", "partial batch mutated conflicting file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: main snapshot guard detects post-apply mutations", () => {
+  const { dir } = makeGitRepo("odw-main-snapshot-");
+  try {
+    const r = run(`export const meta={name:"wsnapshot"};
+phase("P","");
+const add = await agent("write approved", { id:"add", label:"add", isolation:"worktree", mockWriteFile:"approved.txt" });
+const landed = applyWorktreeDiffs([add], { label:"approved" });
+const snap = captureMainWorktreeSnapshot({ label:"after-apply" });
+await agent("verify mutates", { id:"verify", label:"verify", mockWriteFile:"verify-leak.txt" });
+const guard = assertMainWorktreeUnchanged(snap, { label:"verify-readonly" });
+const restore = restoreMainWorktreeSnapshot(snap, guard, { label:"verify-restore" });
+log("SNAPSHOT_GUARD ok="+guard.ok+" added="+guard.added.join("|")+" modified="+guard.modified.join("|"));
+log("SNAPSHOT_RESTORE ok="+restore.ok+" removed="+restore.removed.join("|"));
+return { ok: landed.ok && guard.ok === false && guard.added.includes("verify-leak.txt") && restore.ok && restore.removed.includes("verify-leak.txt") };`, { cwd: dir });
+    assert(r.code === 0, `snapshot guard workflow failed: ${r.out.slice(-700)}`);
+    assert(/SNAPSHOT_GUARD ok=false added=verify-leak\.txt/.test(r.out), `snapshot guard did not detect mutation: ${r.out.slice(-700)}`);
+    assert(/SNAPSHOT_RESTORE ok=true removed=verify-leak\.txt/.test(r.out), `snapshot restore did not remove mutation: ${r.out.slice(-700)}`);
+    assert(!existsSync(join(dir, "verify-leak.txt")), "snapshot restore left leaked file in cwd");
+    assert(ev(r.events, "worktree_snapshot_check").some((e) => e.ok === false && e.added === 1), "missing failed snapshot check event");
+    assert(ev(r.events, "worktree_snapshot_restore").some((e) => e.ok === true && e.removed === 1), "missing snapshot restore event");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: review gate approves a preflight-clean batch", () => {
+  const { dir } = makeGitRepo("odw-review-approve-");
+  try {
+    const r = run(`export const meta={name:"wreviewok"};
+phase("P","");
+const change = await agent("write review ok", { id:"add", label:"add", isolation:"worktree", mockWriteFile:"review-ok.txt" });
+const gate = await reviewWorktreeDiffs([change], { label:"gate-ok", reviewerCount:2 });
+log("GATE decision="+gate.decision+" ok="+gate.ok+" applyReady="+gate.applyReady+" reviewers="+gate.reviews.length);
+return { ok: gate.ok === true && gate.applyReady === true && gate.decision === "approve" && gate.reviews.length === 2 };`, { cwd: dir });
+    assert(r.code === 0, `review approve workflow failed: ${r.out.slice(-500)}`);
+    assert(/GATE decision=approve ok=true applyReady=true reviewers=2/.test(r.out), `approve gate wrong: ${r.out.slice(-500)}`);
+    assert(!existsSync(join(dir, "review-ok.txt")), "review gate should not apply the patch");
+    const gateEvents = ev(r.events, "worktree_review_gate");
+    assert(gateEvents.some((e) => e.decision === "approve" && e.reviewers === 2), `missing approve gate event: ${JSON.stringify(gateEvents)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: review gate rejects when a reviewer finds a blocker", () => {
+  const { dir } = makeGitRepo("odw-review-reject-");
+  try {
+    const r = run(`export const meta={name:"wreviewreject"};
+phase("P","");
+const change = await agent("write review reject", { id:"add", label:"add", isolation:"worktree", mockWriteFile:"review-reject.txt" });
+const gate = await reviewWorktreeDiffs([change], { label:"gate-reject", context:"MOCK_REJECT" });
+log("GATE_REJECT decision="+gate.decision+" ok="+gate.ok+" blockers="+gate.blockers.length);
+return { ok: gate.ok === false && gate.applyReady === false && gate.decision === "reject" && gate.blockers.length > 0 };`, { cwd: dir });
+    assert(r.code === 0, `review reject workflow failed: ${r.out.slice(-500)}`);
+    assert(/GATE_REJECT decision=reject ok=false blockers=[1-9]/.test(r.out), `reject gate wrong: ${r.out.slice(-500)}`);
+    assert(!existsSync(join(dir, "review-reject.txt")), "reject gate should not apply the patch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: review gate can require owner decision", () => {
+  const { dir } = makeGitRepo("odw-review-owner-");
+  try {
+    const r = run(`export const meta={name:"wreviewowner"};
+phase("P","");
+const change = await agent("write review owner", { id:"add", label:"add", isolation:"worktree", mockWriteFile:"review-owner.txt" });
+const gate = await reviewWorktreeDiffs([change], { label:"gate-owner", context:"MOCK_NEEDS_OWNER" });
+log("GATE_OWNER decision="+gate.decision+" ok="+gate.ok+" questions="+gate.owner_questions.length);
+return { ok: gate.ok === false && gate.applyReady === false && gate.decision === "needs_owner" && gate.owner_questions.length > 0 };`, { cwd: dir });
+    assert(r.code === 0, `review owner workflow failed: ${r.out.slice(-500)}`);
+    assert(/GATE_OWNER decision=needs_owner ok=false questions=[1-9]/.test(r.out), `owner gate wrong: ${r.out.slice(-500)}`);
+    assert(!existsSync(join(dir, "review-owner.txt")), "owner gate should not apply the patch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: review gate rejects patch conflicts before reviewer agents", () => {
+  const { dir, git } = makeGitRepo("odw-review-conflict-");
+  try {
+    writeFileSync(join(dir, "same.txt"), "base\n");
+    git(["add", "same.txt"]);
+    git(["commit", "-q", "-m", "same-base"]);
+    writeFileSync(join(dir, "same.txt"), "main\n");
+    const diff = `diff --git a/same.txt b/same.txt
+--- a/same.txt
++++ b/same.txt
+@@ -1 +1 @@
+-base
++branch
+`;
+    const r = run(`export const meta={name:"wreviewconflict"};
+phase("P","");
+const gate = await reviewWorktreeDiffs([{ changed:true, files:["same.txt"], diff:${JSON.stringify(diff)} }], { label:"gate-conflict", reviewerCount:2 });
+log("GATE_CONFLICT decision="+gate.decision+" ok="+gate.ok+" preflight="+gate.preflight.category+" reviewers="+gate.reviews.length);
+return { ok: gate.ok === false && gate.decision === "reject" && gate.preflight.category === "patch_conflict" && gate.reviews.length === 0 };`, { cwd: dir });
+    assert(r.code === 0, `review conflict workflow failed: ${r.out.slice(-500)}`);
+    assert(/GATE_CONFLICT decision=reject ok=false preflight=patch_conflict reviewers=0/.test(r.out), `conflict gate wrong: ${r.out.slice(-500)}`);
+    assert(readFileSync(join(dir, "same.txt"), "utf8") === "main\n", "review conflict preflight mutated cwd");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("worktree: review gate reviewers run inside a candidate worktree", () => {
+  const { dir } = makeGitRepo("odw-review-workspace-");
+  try {
+    const diff = `diff --git a/review-candidate.txt b/review-candidate.txt
+new file mode 100644
+--- /dev/null
++++ b/review-candidate.txt
+@@ -0,0 +1 @@
++candidate
+`;
+    const r = run(`export const meta={name:"wreviewworkspace"};
+phase("P","");
+const gate = await reviewWorktreeDiffs([{ changed:true, files:["review-candidate.txt"], diff:${JSON.stringify(diff)} }], { label:"gate-workspace" });
+log("GATE_WORKSPACE decision="+gate.decision+" ok="+gate.ok+" verification="+gate.verification.join("|"));
+return { ok: gate.ok === true && gate.decision === "approve" && gate.verification.join("|").includes("candidate file") };`, {
+      cwd: dir,
+      backend: "pandacode",
+      pandacodeBin: fakePanda,
+      env: { FAKE_PANDA: "review_workspace_probe" }
+    });
+    assert(r.code === 0, `review workspace workflow failed: ${r.out.slice(-700)}`);
+    assert(/GATE_WORKSPACE decision=approve ok=true verification=.*candidate file/.test(r.out), `review workspace gate wrong: ${r.out.slice(-700)}`);
+    assert(!existsSync(join(dir, "review-candidate.txt")), "review gate should not apply candidate file to main cwd");
+    const wl = spawnSync("git", ["worktree", "list"], { cwd: dir, encoding: "utf8" }).stdout || "";
+    assert(!/[/\\]worktrees[/\\]/.test(wl), `review workspace left a git worktree:\n${wl}`);
+    const workspaceEvents = ev(r.events, "worktree_review_workspace");
+    assert(workspaceEvents.some((e) => e.status === "start") && workspaceEvents.some((e) => e.status === "done"), `missing review workspace lifecycle events: ${JSON.stringify(workspaceEvents)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("worktree: unchanged EXECUTOR node keeps {text, worktree:{changed:false}} (consistent shape)", () => {
@@ -347,6 +617,38 @@ return {ok:true};`);
   assert(/SM ok=false cat=schema_mismatch issues=[1-9]/.test(r.out), `final schema_mismatch result wrong: ${r.out.slice(-300)}`);
 });
 
+test("schema: mock codex-result satisfies its packaged schema", () => {
+  const r = run(`export const meta={name:"mockcodexschema"};
+phase("P","");
+const out = await agent("mock codex result", {
+  label:"codex schema",
+  runtime:"codex",
+  schema:{
+    title:"codex-result.schema.json",
+    type:"object",
+    required:["run_id","status","changed_files","verification","risks","adapter"],
+    properties:{
+      run_id:{type:"string"},
+      status:{enum:["completed","failed","needs_input","stopped"]},
+      changed_files:{type:"array",items:{type:"string"}},
+      verification:{type:"array"},
+      risks:{type:"array",items:{type:"string"}},
+      adapter:{
+        type:"object",
+        required:["backend"],
+        properties:{backend:{enum:["codexctl","pandacode"]},runtime:{type:"string"}}
+      },
+      error:{type:["object","null"]}
+    }
+  }
+});
+log("MCR backend="+out.adapter.backend+" status="+out.status);
+return {ok:true};`);
+  assert(r.code === 0, `mock codex-result schema run failed: ${r.out.slice(-300)}`);
+  assert(ev(r.events, "agent_schema_invalid").length === 0, `unexpected schema mismatch: ${JSON.stringify(ev(r.events, "agent_schema_invalid"))}`);
+  assert(/MCR backend=pandacode status=completed/.test(r.out), `mock codex-result shape wrong: ${r.out.slice(-300)}`);
+});
+
 test("schema: an unloadable schema fails fast and non-retryably", () => {
   // A typo'd/missing schema path is a config error, not a transient mismatch:
   // it must fail with a clear category and NOT burn retries (the file won't
@@ -433,6 +735,8 @@ phase("P","");
 return { answer: 42, tag: "selftest-result" };`);
   assert(r.code === 0, `run failed: ${r.out.slice(-200)}`);
   assert(/\[result\] \{.*"answer":42.*"tag":"selftest-result".*\}/.test(r.out), `no [result] line: ${r.out.slice(-200)}`);
+  assert(/logs: odw runs show /.test(r.out), `zero-install logs command missing: ${r.out.slice(-300)}`);
+  assert(!/\.odw\/bin\/odw runs show/.test(r.out), `stale project-local logs command leaked: ${r.out.slice(-300)}`);
 });
 
 test("result: a non-serializable return is a clean failure, not an opaque crash", () => {
@@ -569,6 +873,39 @@ if (s === "jsonl_final_report") {
   }) + "\\n");
   process.exit(0);
 }
+if (s === "status_noise") {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { spawnSync } = await import("node:child_process");
+  mkdirSync(".pandacode", { recursive: true });
+  writeFileSync(".pandacode/noise.txt", "executor scratch\\n");
+  writeFileSync("intentional.txt", "intentional change\\n");
+  const status = spawnSync("git", ["status", "--short"], { encoding: "utf8" }).stdout || "";
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    state: "completed",
+    runtime: args[0] || "",
+    last_agent_message: "STATUS=" + status.replace(/\\n/g, "|"),
+    summary: { last_agent_message: "STATUS=" + status.replace(/\\n/g, "|") }
+  }) + "\\n");
+  process.exit(0);
+}
+if (s === "review_workspace_probe") {
+  const { existsSync } = await import("node:fs");
+  const sawCandidate = existsSync("review-candidate.txt");
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    state: "completed",
+    runtime: args[0] || "",
+    decision: sawCandidate ? "approve" : "reject",
+    summary: sawCandidate ? "candidate file exists in reviewer cwd" : "candidate file missing from reviewer cwd",
+    blockers: sawCandidate ? [] : ["candidate file missing"],
+    risks: [],
+    owner_questions: [],
+    verification: [sawCandidate ? "review workspace contained candidate file" : "review workspace did not contain candidate file"],
+    files_reviewed: ["review-candidate.txt"]
+  }) + "\\n");
+  process.exit(0);
+}
 const R = {
   exit1_oktrue: ['{"ok":true,"state":"completed","summary":{"ok":true},"last_agent_message":"all good"}', 1],
   exit1_nook:   ['{"state":"completed","summary":{},"last_agent_message":"done-ish"}', 1],
@@ -701,6 +1038,20 @@ return { ok: r?.ok !== false };`;
   assert(odwWorktreeLeftovers().length === 0, `orphan worktree after failure:\n${odwWorktreeLeftovers().join("\n")}`);
 });
 
+test("pandacode: worktree git status hides executor scratch directories", () => {
+  const wf = `export const meta={name:"wstatus"};
+const r = await agent("x",{runtime:"codex",isolation:"worktree",label:"status-noise"});
+log("STATUS_RESULT="+r.text);
+log("WT_FILES="+r.worktree.files.join("|"));
+return { ok: r?.ok !== false };`;
+  const r = run(wf, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "status_noise" } });
+  assert(r.code === 0, `worktree status run failed: ${r.out.slice(-300)}`);
+  assert(/STATUS_RESULT=STATUS=\?\? intentional\.txt\|/.test(r.out), `intentional file missing from status: ${r.out.slice(-500)}`);
+  assert(!/STATUS_RESULT=.*\.pandacode/.test(r.out), `executor scratch leaked into git status: ${r.out.slice(-500)}`);
+  assert(/WT_FILES=intentional\.txt/.test(r.out), `captured files wrong: ${r.out.slice(-500)}`);
+  assert(odwWorktreeLeftovers().length === 0, `orphan worktree after status run:\n${odwWorktreeLeftovers().join("\n")}`);
+});
+
 // 11. .d.ts contract matches the real sandbox globals (no drift) -------------
 test("contract: workflow-api.d.ts globals exactly match the runtime sandbox", () => {
   const dts = readFileSync(join(REPO, "src/pack/templates/workflow-api.d.ts"), "utf8");
@@ -777,6 +1128,253 @@ return {ok:true};`);
   assert(/"runtime":"codex"/.test(html) && /"runtime":"claude"/.test(html), "node runtimes missing in report");
   assert(/"model":"gpt-5-codex"/.test(html), "node model missing in report");
   assert(/config \(from code\)/.test(html) && /"prompt":"alpha task"/.test(html), "report missing config/prompt UI parsed from code");
+});
+
+test("report: review gate and apply events are visible in the execution graph", () => {
+  const { dir } = makeGitRepo("odw-report-events-");
+  try {
+    const r = run(`export const meta={name:"rpevents"};
+phase("P","");
+const change = await agent("write report event", { id:"change", label:"change", isolation:"worktree", mockWriteFile:"report-event.txt" });
+const gate = await reviewWorktreeDiffs([change], { label:"report-gate" });
+if (!gate.applyReady) return { ok:false, gate };
+const landed = applyWorktreeDiffs([change], { label:"report-apply" });
+return { ok: landed.ok, gate, landed };`, { cwd: dir });
+    assert(r.code === 0 && r.runId, `run failed: ${r.out.slice(-500)}`);
+    const rep = spawnSync(ODW, ["report", "--path", dir, "--run", r.runId], { cwd: dir, encoding: "utf8" });
+    assert((rep.status ?? 1) === 0, `report failed: ${((rep.stdout || "") + (rep.stderr || "")).slice(-300)}`);
+    const htmlPath = (rep.stdout || "").trim().split(/\r?\n/).pop();
+    const html = readFileSync(htmlPath, "utf8");
+    assert(/gate: approve/.test(html), "review gate node missing from report");
+    assert(/worktree_review_gate/.test(html), "review gate event detail missing from report");
+    assert(/worktree_review_workspace/.test(html), "review workspace event detail missing from report");
+    assert(/worktree_patch_apply/.test(html), "apply event detail missing from report");
+    assert(/review gates/.test(html) && /apply events/.test(html), "overview event counts missing from report");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report: rejected review gates expose blocker evidence", () => {
+  const { dir } = makeGitRepo("odw-report-reject-evidence-");
+  try {
+    const r = run(`export const meta={name:"rpreject"};
+phase("P","");
+const change = await agent("write rejected report event", { id:"change", label:"change", isolation:"worktree", mockWriteFile:"report-reject.txt" });
+const gate = await reviewWorktreeDiffs([change], { label:"report-reject", context:"MOCK_REJECT" });
+return { ok: true, gate };`, { cwd: dir });
+    assert(r.code === 0 && r.runId, `run failed: ${r.out.slice(-500)}`);
+    const rep = spawnSync(ODW, ["report", "--path", dir, "--run", r.runId], { cwd: dir, encoding: "utf8" });
+    assert((rep.status ?? 1) === 0, `report failed: ${((rep.stdout || "") + (rep.stderr || "")).slice(-300)}`);
+    const htmlPath = (rep.stdout || "").trim().split(/\r?\n/).pop();
+    const html = readFileSync(htmlPath, "utf8");
+    assert(/gate: reject/.test(html), "reject gate node missing from report");
+    assert(/blocker_samples/.test(html) && /mock blocker/.test(html), "reject gate blocker evidence missing from report");
+    assert(/review_decisions/.test(html) && /review:reject/.test(html), "reject gate reviewer decision evidence missing from report");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report: workflow log events are visible", () => {
+  const r = run(`export const meta={name:"rplog"};
+phase("P","");
+log("REPORT_LOG evidence visible");
+return {ok:true};`);
+  assert(r.code === 0 && r.runId, `run failed: ${r.out.slice(-300)}`);
+  const rep = spawnSync(ODW, ["report", "--path", REPO, "--run", r.runId], { cwd: REPO, encoding: "utf8" });
+  assert((rep.status ?? 1) === 0, `report failed: ${((rep.stdout || "") + (rep.stderr || "")).slice(-300)}`);
+  const htmlPath = (rep.stdout || "").trim().split(/\r?\n/).pop();
+  const html = readFileSync(htmlPath, "utf8");
+  assert(/log: REPORT_LOG evidence visible/.test(html), "workflow log node missing from report");
+  assert(/"message":"REPORT_LOG evidence visible"/.test(html), "workflow log detail missing from report");
+});
+
+test("examples: parallel-review-apply starter dry-runs and lands approved diffs", () => {
+  const { dir } = makeGitRepo("odw-example-07-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('example verify ok')\"",
+      tasks: [
+        { id: "alpha", file: "docs/alpha.md", prompt: "Create docs/alpha.md." },
+        { id: "beta", file: "docs/beta.md", prompt: "Create docs/beta.md." }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `example 07 run failed: ${r.out.slice(-700)}`);
+    assert(existsSync(join(dir, "docs/alpha.md")), "example 07 did not land alpha file");
+    assert(existsSync(join(dir, "docs/beta.md")), "example 07 did not land beta file");
+    assert(ev(r.events, "worktree_review_gate").some((e) => e.decision === "approve"), "example 07 missing approve gate");
+    assert(ev(r.events, "worktree_patch_apply").filter((e) => e.applied).length === 2, "example 07 missing two apply events");
+    const rep = spawnSync(ODW, ["report", "--path", dir, "--run", r.runId], { cwd: dir, encoding: "utf8" });
+    assert((rep.status ?? 1) === 0, `example 07 report failed: ${((rep.stdout || "") + (rep.stderr || "")).slice(-300)}`);
+    const html = readFileSync((rep.stdout || "").trim().split(/\r?\n/).pop(), "utf8");
+    assert(/gate: approve/.test(html) && /apply applied/.test(html), "example 07 report missing gate/apply nodes");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("examples: parallel-review-apply repairs only blocker-matched tasks before landing", () => {
+  const { dir } = makeGitRepo("odw-example-07-repair-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('repair verify ok')\"",
+      maxReviewRounds: 2,
+      tasks: [
+        { id: "alpha", file: "docs/repair-alpha.md", prompt: "Create docs/repair-alpha.md." },
+        { id: "beta", file: "docs/repair-beta.md", prompt: "Create docs/repair-beta.md." }
+      ],
+      reviewers: [
+        { label: "flaky-review", runtime: "codex", perspective: "MOCK_REJECT_ONCE_FILE:docs/repair-beta.md" }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `example 07 repair run failed: ${r.out.slice(-900)}`);
+    assert(/repairing tasks=beta/.test(r.out), `repair did not target beta only: ${r.out.slice(-900)}`);
+    const result = r.state.result;
+    assert(Array.isArray(result?.history), "starter result missing history");
+    assert(result.history.some((item) => item.step === "review" && item.decision === "reject"), "history missing rejected review");
+    assert(result.history.some((item) => item.step === "repair_plan" && item.tasks?.join("|") === "beta"), "history missing targeted repair plan");
+    assert(result.history.some((item) => item.step === "repair" && item.files?.includes("docs/repair-beta.md")), "history missing repair files");
+    assert(result.history.some((item) => item.step === "review" && item.decision === "approve"), "history missing approved review");
+    const gates = ev(r.events, "worktree_review_gate");
+    assert(gates.some((e) => e.decision === "reject"), `repair test missing reject gate: ${JSON.stringify(gates)}`);
+    assert(gates.some((e) => e.decision === "approve"), `repair test missing approve gate: ${JSON.stringify(gates)}`);
+    const alpha = readFileSync(join(dir, "docs/repair-alpha.md"), "utf8");
+    const beta = readFileSync(join(dir, "docs/repair-beta.md"), "utf8");
+    assert(/mock change by impl:alpha/.test(alpha), `unchanged task should retain initial candidate: ${alpha}`);
+    assert(/mock change by repair:beta/.test(beta), `blocker-matched task should land repair diff: ${beta}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("examples: parallel-review-apply blocks failed or cross-owned implementation before review", () => {
+  const { dir } = makeGitRepo("odw-example-07-pre-review-block-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('pre-review block')\"",
+      maxReviewRounds: 2,
+      tasks: [
+        {
+          id: "alpha",
+          file: "docs/pre-alpha.md",
+          mockFile: "docs/pre-beta.md",
+          prompt: "Create docs/pre-alpha.md but the mock intentionally writes beta's file."
+        },
+        {
+          id: "beta",
+          file: "docs/pre-beta.md",
+          mockFail: true,
+          prompt: "Create docs/pre-beta.md but the mock intentionally fails."
+        }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code !== 0, "starter should not land a partial batch with failed/cross-owned implementation");
+    const result = r.state.result;
+    assert(result?.error?.category === "implementation_pre_review_blocked", `wrong pre-review error: ${JSON.stringify(result?.error)}`);
+    assert(result.history?.some((item) => item.step === "pre_review_block"), "history missing pre_review_block");
+    assert(result.history?.some((item) => item.step === "repair_plan" && item.reason === "pre_review_block"), "history missing pre-review repair plan");
+    assert(!existsSync(join(dir, "docs/pre-beta.md")), "cross-owned partial candidate was landed");
+    assert(ev(r.events, "worktree_review_gate").length === 0, "review gate should not run before implementation issues are fixed");
+    assert(ev(r.events, "worktree_patch_apply").length === 0, "apply should not run for pre-review blocked batch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("examples: parallel-review-apply blocks dirty task files before isolated worktrees", () => {
+  const { dir, git } = makeGitRepo("odw-example-07-dirty-task-");
+  try {
+    writeFileSync(join(dir, "tracked.txt"), "committed\n");
+    git(["add", "tracked.txt"]);
+    git(["commit", "-q", "-m", "tracked"]);
+    writeFileSync(join(dir, "tracked.txt"), "dirty\n");
+
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('dirty task guard')\"",
+      tasks: [
+        { id: "tracked", file: "tracked.txt", prompt: "Update tracked.txt." }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code !== 0, "starter should fail before worktrees when task files are dirty");
+    const result = r.state.result;
+    assert(result?.error?.category === "dirty_task_files", `wrong dirty-file error: ${JSON.stringify(result?.error)}`);
+    assert(result?.dirtyTaskFiles?.includes("tracked.txt"), `dirty file not reported: ${JSON.stringify(result)}`);
+    assert(readFileSync(join(dir, "tracked.txt"), "utf8") === "dirty\n", "dirty guard should not rewrite the user's file");
+    assert(ev(r.events, "worktree_start").length === 0, "dirty guard should not create implementation worktrees");
+    assert(ev(r.events, "worktree_review_gate").length === 0, "dirty guard should not run review gate");
+    assert(ev(r.events, "worktree_patch_apply").length === 0, "dirty guard should not apply patches");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("examples: parallel-review-apply fails if final verification mutates cwd", () => {
+  const { dir } = makeGitRepo("odw-example-07-verify-guard-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('verify guard')\"",
+      verifyMockWriteFile: "docs/verify-leak.md",
+      tasks: [
+        { id: "alpha", file: "docs/guard-alpha.md", prompt: "Create docs/guard-alpha.md." }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code !== 0, "starter should fail when final verification mutates cwd");
+    const result = r.state.result;
+    assert(result?.error?.category === "verification_mutated_worktree", `wrong verification guard error: ${JSON.stringify(result?.error)}`);
+    assert(result?.verifyGuard?.added?.includes("docs/verify-leak.md"), `verify guard missing added file: ${JSON.stringify(result?.verifyGuard)}`);
+    assert(result?.verifyRestore?.ok === true && result.verifyRestore.removed?.includes("docs/verify-leak.md"), `verify restore missing removed file: ${JSON.stringify(result?.verifyRestore)}`);
+    assert(!existsSync(join(dir, "docs/verify-leak.md")), "starter verify guard left leaked file in cwd");
+    assert(ev(r.events, "worktree_snapshot_check").some((e) => e.ok === false && e.files === 1), "missing failed snapshot check event");
+    assert(ev(r.events, "worktree_snapshot_restore").some((e) => e.ok === true && e.removed === 1), "missing snapshot restore event");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("starter: built-in parallel-review-apply prints a runnable workflow", () => {
+  const list = runOdw(["starter", "--list"]);
+  assert(list.code === 0, `starter --list failed: ${list.out.slice(-300)}`);
+  assert(/parallel-review-apply/.test(list.out), `starter list missing parallel-review-apply: ${list.out}`);
+  const starter = runOdw(["starter", "parallel-review-apply"]);
+  assert(starter.code === 0, `starter print failed: ${starter.out.slice(-300)}`);
+  assert(/reviewWorktreeDiffs/.test(starter.out) && /applyWorktreeDiffs/.test(starter.out), "starter output missing review/apply APIs");
+  assert(/owner-provided product intent/.test(starter.out), "starter output missing owner-intent review policy");
+  assert(/history/.test(starter.out) && /repair_plan/.test(starter.out), "starter output missing review/repair history");
+  assert(/pre_review_block/.test(starter.out) && /strictTaskFileBoundaries/.test(starter.out), "starter output missing pre-review implementation gate");
+  assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
+  assert(/captureMainWorktreeSnapshot/.test(starter.out) && /permission: "limited"/.test(starter.out), "starter output missing read-only final verification guard");
+  const { dir } = makeGitRepo("odw-starter-cli-");
+  try {
+    const scriptPath = join(dir, "starter.js");
+    writeFileSync(join(dir, "package.json"), "{\"type\":\"module\"}\n");
+    writeFileSync(scriptPath, starter.out);
+    const syntax = spawnSync("node", ["--check", scriptPath], { cwd: dir, encoding: "utf8" });
+    assert((syntax.status ?? 1) === 0, `starter output is not valid ESM: ${((syntax.stdout || "") + (syntax.stderr || "")).slice(-300)}`);
+    const input = {
+      test: "node -e \"console.log('starter verify ok')\"",
+      tasks: [
+        { id: "one", file: "docs/one.md", prompt: "Create docs/one.md." },
+        { id: "two", file: "docs/two.md", prompt: "Create docs/two.md." }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `starter output workflow failed: ${r.out.slice(-700)}`);
+    assert(existsSync(join(dir, "docs/one.md")) && existsSync(join(dir, "docs/two.md")), "starter output did not land docs files");
+    assert(ev(r.events, "worktree_review_gate").some((e) => e.decision === "approve"), "starter output missing approve gate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("observability: a model the script left implicit is backfilled from the executor", () => {

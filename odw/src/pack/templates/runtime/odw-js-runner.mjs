@@ -1,4 +1,5 @@
 import { spawn, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import os from "node:os";
@@ -1264,6 +1265,44 @@ globalThis.pandacode = {
   }
 };
 
+globalThis.applyWorktreeDiff = (candidate, options = {}) => applyCapturedWorktreeDiff(candidate, options);
+globalThis.applyWorktreeDiffs = (candidates, options = {}) => {
+  if (!options.continueOnError) {
+    return applyCapturedWorktreeDiffsAtomic(candidates, options);
+  }
+  const list = Array.isArray(candidates) ? candidates : [candidates];
+  const results = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const result = applyCapturedWorktreeDiff(list[index], {
+      ...options,
+      label: patchApplyLabel(options, index)
+    });
+    results.push(result);
+  }
+  return worktreePatchBatchResult(results);
+};
+globalThis.reviewWorktreeDiffs = (candidates, options = {}) => reviewCapturedWorktreeDiffs(candidates, options);
+globalThis.captureMainWorktreeSnapshot = (options = {}) => captureMainWorktreeSnapshot(options);
+globalThis.assertMainWorktreeUnchanged = (snapshot, options = {}) => assertMainWorktreeUnchanged(snapshot, options);
+globalThis.restoreMainWorktreeSnapshot = (snapshot, check, options = {}) => restoreMainWorktreeSnapshot(snapshot, check, options);
+
+const mockReviewRejectOnce = new Map();
+
+const WORKTREE_REVIEW_SCHEMA = {
+  title: "odw-worktree-review.schema.json",
+  type: "object",
+  required: ["decision", "summary", "blockers", "risks", "owner_questions", "verification"],
+  properties: {
+    decision: { enum: ["approve", "reject", "needs_owner"] },
+    summary: { type: "string" },
+    blockers: { type: "array", items: { type: "string" } },
+    risks: { type: "array", items: { type: "string" } },
+    owner_questions: { type: "array", items: { type: "string" } },
+    verification: { type: "array", items: { type: "string" } },
+    files_reviewed: { type: "array", items: { type: "string" } }
+  }
+};
+
 function createWorktree(baseCwd, options) {
   let gitOk = false;
   try {
@@ -1292,6 +1331,7 @@ function createWorktree(baseCwd, options) {
   const dir = `${parent}/${label}-${worktreeSeq}`;
   rmSync(dir, { recursive: true, force: true });
   execFileSync("git", ["-C", baseCwd, "worktree", "add", "--detach", "--quiet", dir], { stdio: "ignore" });
+  configureWorktreeExcludes(dir);
   const cleanup = () => {
     try {
       execFileSync("git", ["-C", baseCwd, "worktree", "remove", "--force", dir], { stdio: "ignore" });
@@ -1303,6 +1343,25 @@ function createWorktree(baseCwd, options) {
   return { dir, cleanup };
 }
 
+function configureWorktreeExcludes(dir) {
+  try {
+    const excludePath = execFileSync("git", ["-C", dir, "rev-parse", "--git-path", "info/exclude"], { encoding: "utf8" }).trim();
+    if (!excludePath) {
+      return;
+    }
+    mkdirSync(dirname(excludePath), { recursive: true });
+    const existing = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
+    const lines = [".pandacode/", ".odw/", "node_modules/"];
+    const additions = lines.filter((line) => !existing.split(/\r?\n/).includes(line));
+    if (additions.length > 0) {
+      const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
+      writeFileSync(excludePath, `${existing}${prefix}${additions.join("\n")}\n`);
+    }
+  } catch {
+    // Best-effort only: diff capture still excludes executor scratch paths.
+  }
+}
+
 // After a worktree node runs, capture the agent's file changes as a portable
 // patch. Built-in keeps a changed worktree on disk; ODW instead returns the diff
 // as data and removes the dir — no orphan worktrees, changes never silently lost.
@@ -1311,19 +1370,671 @@ function createWorktree(baseCwd, options) {
 const WORKTREE_DIFF_EXCLUDES = [".", ":(exclude).pandacode", ":(exclude).odw", ":(exclude)node_modules"];
 function captureWorktreeChanges(dir) {
   try {
+    const base = execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     // Plain `git add -A` silently respects .gitignore (no error on ignored files);
     // the executor-scratch exclusion is applied to status/diff so it works even in
     // a repo that does NOT gitignore .pandacode/.odw.
     execFileSync("git", ["-C", dir, "add", "-A"], { stdio: "ignore" });
     const status = execFileSync("git", ["-C", dir, "status", "--porcelain", "--", ...WORKTREE_DIFF_EXCLUDES], { encoding: "utf8" });
     if (!status.trim()) {
-      return { changed: false, files: [], diff: "" };
+      return { changed: false, files: [], diff: "", base };
     }
     const files = status.trim().split(/\r?\n/).map((line) => line.slice(3).trim()).filter(Boolean);
     const diff = execFileSync("git", ["-C", dir, "diff", "--cached", "HEAD", "--", ...WORKTREE_DIFF_EXCLUDES], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-    return { changed: true, files, diff };
+    return { changed: true, files, diff, base };
   } catch (error) {
     return { changed: false, files: [], diff: "", error: String(error?.message ?? error) };
+  }
+}
+
+function worktreePatchOf(candidate) {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+  if (candidate.worktree && typeof candidate.worktree === "object") {
+    return candidate.worktree;
+  }
+  if ("diff" in candidate || "changed" in candidate || "files" in candidate) {
+    return candidate;
+  }
+  return null;
+}
+
+function applyCapturedWorktreeDiff(candidate, options = {}) {
+  const worktree = worktreePatchOf(candidate);
+  const label = options.label || "worktree diff";
+  if (!worktree) {
+    const result = {
+      ok: false,
+      applied: false,
+      files: [],
+      error: { category: "invalid_worktree_diff", message: "Expected an agent result with .worktree or a worktree diff object." }
+    };
+    emitWorktreePatchApply(label, result);
+    return result;
+  }
+
+  const files = Array.isArray(worktree.files) ? worktree.files : [];
+  if (!worktree.changed || !String(worktree.diff || "").trim()) {
+    const result = { ok: true, applied: false, changed: false, files, base: worktree.base || null };
+    emitWorktreePatchApply(label, result);
+    return result;
+  }
+
+  const diff = String(worktree.diff);
+  const check = runGitApply(["apply", "--check", "--whitespace=nowarn"], diff);
+  if (!check.ok) {
+    const result = {
+      ok: false,
+      applied: false,
+      files,
+      base: worktree.base || null,
+      error: { category: "patch_conflict", message: check.message }
+    };
+    emitWorktreePatchApply(label, result);
+    return result;
+  }
+
+  const applied = runGitApply(["apply", "--whitespace=nowarn"], diff);
+  if (!applied.ok) {
+    const result = {
+      ok: false,
+      applied: false,
+      files,
+      base: worktree.base || null,
+      error: { category: "patch_apply_failed", message: applied.message }
+    };
+    emitWorktreePatchApply(label, result);
+    return result;
+  }
+
+  const result = { ok: true, applied: true, files, base: worktree.base || null };
+  emitWorktreePatchApply(label, result);
+  return result;
+}
+
+function applyCapturedWorktreeDiffsAtomic(candidates, options = {}) {
+  const list = Array.isArray(candidates) ? candidates : [candidates];
+  const prepared = list.map((candidate, index) => prepareWorktreePatch(candidate, patchApplyLabel(options, index)));
+  const invalid = prepared.filter((entry) => entry.result?.ok === false);
+  if (invalid.length > 0) {
+    const results = prepared.map((entry) => entry.result || {
+      ok: false,
+      applied: false,
+      files: entry.files,
+      base: entry.base,
+      error: {
+        category: "batch_preflight_failed",
+        message: "Batch contains an invalid worktree diff; no patch was applied."
+      }
+    });
+    emitWorktreePatchApplyResults(prepared, results);
+    return worktreePatchBatchResult(results);
+  }
+
+  const changed = prepared.filter((entry) => entry.diff);
+  if (changed.length === 0) {
+    const results = prepared.map((entry) => entry.result);
+    emitWorktreePatchApplyResults(prepared, results);
+    return worktreePatchBatchResult(results);
+  }
+
+  const combinedDiff = `${changed.map((entry) => entry.diff.trimEnd()).join("\n\n")}\n`;
+  const check = runGitApply(["apply", "--check", "--whitespace=nowarn"], combinedDiff);
+  if (!check.ok) {
+    const results = prepared.map((entry) => entry.result || {
+      ok: false,
+      applied: false,
+      files: entry.files,
+      base: entry.base,
+      error: { category: "patch_conflict", message: check.message }
+    });
+    emitWorktreePatchApplyResults(prepared, results);
+    return worktreePatchBatchResult(results);
+  }
+
+  const applied = runGitApply(["apply", "--whitespace=nowarn"], combinedDiff);
+  if (!applied.ok) {
+    const results = prepared.map((entry) => entry.result || {
+      ok: false,
+      applied: false,
+      files: entry.files,
+      base: entry.base,
+      error: { category: "patch_apply_failed", message: applied.message }
+    });
+    emitWorktreePatchApplyResults(prepared, results);
+    return worktreePatchBatchResult(results);
+  }
+
+  const results = prepared.map((entry) => entry.result || {
+    ok: true,
+    applied: true,
+    files: entry.files,
+    base: entry.base
+  });
+  emitWorktreePatchApplyResults(prepared, results);
+  return worktreePatchBatchResult(results);
+}
+
+function prepareWorktreePatch(candidate, label) {
+  const worktree = worktreePatchOf(candidate);
+  if (!worktree) {
+    return {
+      label,
+      files: [],
+      base: null,
+      result: {
+        ok: false,
+        applied: false,
+        files: [],
+        error: { category: "invalid_worktree_diff", message: "Expected an agent result with .worktree or a worktree diff object." }
+      }
+    };
+  }
+  const files = Array.isArray(worktree.files) ? worktree.files : [];
+  const base = worktree.base || null;
+  const diff = String(worktree.diff || "");
+  if (!worktree.changed || !diff.trim()) {
+    return {
+      label,
+      files,
+      base,
+      result: { ok: true, applied: false, changed: false, files, base }
+    };
+  }
+  return { label, files, base, diff };
+}
+
+function patchApplyLabel(options, index) {
+  return options.label ? `${options.label}-${index + 1}` : `patch-${index + 1}`;
+}
+
+function emitWorktreePatchApplyResults(entries, results) {
+  for (let index = 0; index < results.length; index += 1) {
+    emitWorktreePatchApply(entries[index]?.label || `patch-${index + 1}`, results[index]);
+  }
+}
+
+function emitWorktreePatchApply(label, result) {
+  const event = {
+    type: "worktree_patch_apply",
+    label,
+    ok: result.ok === true,
+    applied: result.applied === true,
+    files: Array.isArray(result.files) ? result.files.length : 0
+  };
+  if (result.error) {
+    event.category = result.error.category;
+    event.message = truncateText(result.error.message, 240);
+  }
+  emit(event);
+}
+
+function worktreePatchBatchResult(results) {
+  const failed = results.filter((result) => result.ok === false);
+  const applied = results.filter((result) => result.applied === true);
+  return {
+    ok: failed.length === 0,
+    applied: applied.length,
+    failed: failed.length,
+    partial: failed.length > 0 && applied.length > 0,
+    results
+  };
+}
+
+async function reviewCapturedWorktreeDiffs(candidates, options = {}) {
+  const list = Array.isArray(candidates) ? candidates : [candidates];
+  const label = options.label || "worktree-review";
+  const prepared = list.map((candidate, index) => prepareWorktreePatch(candidate, patchApplyLabel(options, index)));
+  const invalid = prepared.filter((entry) => entry.result?.ok === false);
+  const files = uniqueStrings(prepared.flatMap((entry) => entry.files));
+  if (invalid.length > 0) {
+    const gate = {
+      ok: false,
+      decision: "reject",
+      applyReady: false,
+      files,
+      preflight: {
+        ok: false,
+        category: "invalid_worktree_diff",
+        message: "One or more candidates are not captured worktree diffs."
+      },
+      reviews: []
+    };
+    emitWorktreeReviewGate(label, gate);
+    return gate;
+  }
+
+  const changed = prepared.filter((entry) => entry.diff);
+  if (changed.length === 0) {
+    const gate = {
+      ok: true,
+      decision: "approve",
+      applyReady: false,
+      files,
+      preflight: { ok: true, changed: false },
+      reviews: []
+    };
+    emitWorktreeReviewGate(label, gate);
+    return gate;
+  }
+
+  const combinedDiff = combinedWorktreeDiff(changed);
+  const check = runGitApply(["apply", "--check", "--whitespace=nowarn"], combinedDiff);
+  if (!check.ok) {
+    const gate = {
+      ok: false,
+      decision: "reject",
+      applyReady: false,
+      files,
+      preflight: {
+        ok: false,
+        category: "patch_conflict",
+        message: check.message
+      },
+      reviews: []
+    };
+    emitWorktreeReviewGate(label, gate);
+    return gate;
+  }
+
+  let reviewWorktree = null;
+  let reviewWorkspaceReady = false;
+  try {
+    try {
+      reviewWorktree = createWorktree(cwd, { id: `${label}-candidate`, label: `${label}-candidate` });
+    } catch (error) {
+      const gate = {
+        ok: false,
+        decision: "reject",
+        applyReady: false,
+        files,
+        preflight: {
+          ok: false,
+          category: "review_workspace_failed",
+          message: String(error?.message ?? error)
+        },
+        reviews: []
+      };
+      emitWorktreeReviewGate(label, gate);
+      return gate;
+    }
+    const reviewApply = runGitApplyIn(reviewWorktree.dir, ["apply", "--whitespace=nowarn"], combinedDiff);
+    if (!reviewApply.ok) {
+      const gate = {
+        ok: false,
+        decision: "reject",
+        applyReady: false,
+        files,
+        preflight: {
+          ok: false,
+          category: "review_workspace_failed",
+          message: reviewApply.message
+        },
+        reviews: []
+      };
+      emitWorktreeReviewGate(label, gate);
+      return gate;
+    }
+    reviewWorkspaceReady = true;
+    emit({ type: "worktree_review_workspace", label, status: "start", dir: reviewWorktree.dir, files: files.length });
+
+    const reviewers = normalizeWorktreeReviewers(options);
+    const basePrompt = buildWorktreeReviewPrompt({ prepared: changed, combinedDiff, files, options });
+    const reviews = await globalThis.parallel(
+      reviewers.map((reviewer, index) => () =>
+        globalThis.agent(buildReviewerPrompt(basePrompt, reviewer), {
+          id: reviewer.id || `${label}-review-${index + 1}`,
+          label: reviewer.label || `review-${index + 1}`,
+          phase: options.phase,
+          runtime: reviewer.runtime || options.runtime || "codex",
+          provider: reviewer.provider || options.provider,
+          permission: reviewer.permission || options.permission || "limited",
+          model: reviewer.model || options.model,
+          effort: reviewer.effort || options.effort,
+          timeout: reviewer.timeout || options.timeout,
+          execCwd: reviewWorktree.dir,
+          schema: WORKTREE_REVIEW_SCHEMA,
+          schemaDescription: "Final response is the structured ODW worktree diff review gate verdict.",
+          retry: reviewer.retry || options.retry || { maxAttempts: 2 }
+        })
+      ),
+      { label: `${label}-review`, max: options.maxReviewers || reviewers.length }
+    );
+    const normalizedReviews = reviews.map((review, index) => normalizeWorktreeReview(review, reviewers[index]));
+    const gate = aggregateWorktreeReviewGate({ label, files, reviews: normalizedReviews });
+    emitWorktreeReviewGate(label, gate);
+    return gate;
+  } finally {
+    if (reviewWorktree) {
+      reviewWorktree.cleanup();
+      if (reviewWorkspaceReady) {
+        emit({ type: "worktree_review_workspace", label, status: "done", files: files.length });
+      }
+    }
+  }
+}
+
+function combinedWorktreeDiff(entries) {
+  return `${entries.map((entry) => String(entry.diff || "").trimEnd()).filter(Boolean).join("\n\n")}\n`;
+}
+
+function normalizeWorktreeReviewers(options = {}) {
+  if (Array.isArray(options.reviewers) && options.reviewers.length > 0) {
+    return options.reviewers.map((reviewer, index) =>
+      typeof reviewer === "string"
+        ? { label: reviewer, perspective: reviewer }
+        : { label: `review-${index + 1}`, ...(reviewer || {}) }
+    );
+  }
+  const count = Math.max(1, Math.min(4, Number(options.reviewerCount || 1)));
+  const defaultPerspectives = [
+    "correctness and regression risk",
+    "adversarial edge-case review",
+    "product intent and owner decision risk",
+    "verification evidence review"
+  ];
+  return Array.from({ length: count }, (_, index) => ({
+    label: count === 1 ? "review" : `review-${index + 1}`,
+    perspective: defaultPerspectives[index] || "general review",
+    runtime: options.runtime || "codex",
+    permission: options.permission || "limited"
+  }));
+}
+
+function buildWorktreeReviewPrompt({ prepared, combinedDiff, files, options }) {
+  const diffLimit = Math.max(2000, Number(options.maxDiffChars || 30000));
+  const diffText = truncateText(combinedDiff, diffLimit, "head");
+  const context = options.context ? `\nProject context:\n${String(options.context)}\n` : "";
+  const criteria = Array.isArray(options.criteria) && options.criteria.length > 0
+    ? options.criteria.map((item) => `- ${item}`).join("\n")
+    : "- Check whether this batch is safe to land atomically.\n- Identify blockers, missing verification, semantic conflicts, and owner decisions.\n- Prefer needs_owner when product intent or acceptance criteria require human judgment.";
+  return `Review an ODW batch of captured worktree diffs before atomic landing.
+
+The combined diff has already been applied to your current working directory for
+this review node. Inspect the files and run relevant tests/checks there. Do not
+edit files.
+
+Files:
+${files.map((file) => `- ${file}`).join("\n")}
+
+Base commits:
+${uniqueStrings(prepared.map((entry) => entry.base).filter(Boolean)).map((base) => `- ${base}`).join("\n") || "- unknown"}
+${context}
+Review criteria:
+${criteria}
+
+Return decision:
+- approve: safe to apply atomically after this gate.
+- reject: do not apply; blockers or failed verification must be fixed first.
+- needs_owner: owner/product decision is required before AI should land the batch.
+
+Combined diff:
+${diffText}`;
+}
+
+function buildReviewerPrompt(basePrompt, reviewer) {
+  const perspective = reviewer.perspective ? `\nReviewer perspective: ${reviewer.perspective}\n` : "";
+  return `${basePrompt}${perspective}
+Be adversarial and evidence-backed. Do not edit files.`;
+}
+
+function normalizeWorktreeReview(review, reviewer = {}) {
+  if (!review || review.ok === false) {
+    return {
+      reviewer: reviewer.label || "review",
+      decision: "reject",
+      summary: firstText(review?.error?.message, "reviewer failed or returned no result"),
+      blockers: [firstText(review?.error?.message, "reviewer failed or returned no result")],
+      risks: [],
+      owner_questions: [],
+      verification: [],
+      files_reviewed: []
+    };
+  }
+  if (typeof review === "object" && !Array.isArray(review)) {
+    const decision = ["approve", "reject", "needs_owner"].includes(review.decision) ? review.decision : inferReviewDecision(review.summary || "");
+    return {
+      reviewer: reviewer.label || "review",
+      decision,
+      summary: firstText(review.summary, JSON.stringify(review).slice(0, 1000)),
+      blockers: stringArray(review.blockers),
+      risks: stringArray(review.risks),
+      owner_questions: stringArray(review.owner_questions),
+      verification: stringArray(review.verification),
+      files_reviewed: stringArray(review.files_reviewed)
+    };
+  }
+  const text = String(review);
+  return {
+    reviewer: reviewer.label || "review",
+    decision: inferReviewDecision(text),
+    summary: text.slice(0, 1000),
+    blockers: /reject|fail|blocker|失败|拒绝|不通过/i.test(text) ? [text.slice(0, 1000)] : [],
+    risks: [],
+    owner_questions: /needs_owner|owner|拍板|决策/i.test(text) ? [text.slice(0, 1000)] : [],
+    verification: [],
+    files_reviewed: []
+  };
+}
+
+function inferReviewDecision(text) {
+  const value = String(text || "");
+  if (/needs_owner|owner|拍板|决策|需要.*确认/i.test(value)) {
+    return "needs_owner";
+  }
+  if (/reject|fail|blocker|failed|失败|拒绝|不通过|阻塞/i.test(value)) {
+    return "reject";
+  }
+  return "approve";
+}
+
+function aggregateWorktreeReviewGate({ files, reviews }) {
+  const rejected = reviews.filter((review) => review.decision === "reject");
+  const owner = reviews.filter((review) => review.decision === "needs_owner");
+  const decision = rejected.length > 0 ? "reject" : (owner.length > 0 ? "needs_owner" : "approve");
+  const ok = decision === "approve";
+  return {
+    ok,
+    decision,
+    applyReady: ok,
+    files,
+    preflight: { ok: true, changed: true },
+    reviews,
+    blockers: uniqueStrings(reviews.flatMap((review) => review.blockers)),
+    risks: uniqueStrings(reviews.flatMap((review) => review.risks)),
+    owner_questions: uniqueStrings(reviews.flatMap((review) => review.owner_questions)),
+    verification: uniqueStrings(reviews.flatMap((review) => review.verification))
+  };
+}
+
+function emitWorktreeReviewGate(label, gate) {
+  emit({
+    type: "worktree_review_gate",
+    label,
+    ok: gate.ok === true,
+    decision: gate.decision,
+    applyReady: gate.applyReady === true,
+    files: Array.isArray(gate.files) ? gate.files.length : 0,
+    file_samples: previewStrings(gate.files, 8, 160),
+    reviewers: Array.isArray(gate.reviews) ? gate.reviews.length : 0,
+    review_decisions: previewStrings(
+      (gate.reviews || []).map((review) => `${review.reviewer || "review"}:${review.decision || "unknown"}`),
+      8,
+      160
+    ),
+    blockers: Array.isArray(gate.blockers) ? gate.blockers.length : 0,
+    blocker_samples: previewStrings(gate.blockers, 5, 500),
+    risks: Array.isArray(gate.risks) ? gate.risks.length : 0,
+    risk_samples: previewStrings(gate.risks, 5, 500),
+    owner_questions: Array.isArray(gate.owner_questions) ? gate.owner_questions.length : 0,
+    owner_question_samples: previewStrings(gate.owner_questions, 5, 500),
+    verification_samples: previewStrings(gate.verification, 5, 500)
+  });
+}
+
+function stringArray(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean) : [];
+}
+
+function previewStrings(values, maxItems = 5, maxChars = 300) {
+  return stringArray(values).slice(0, maxItems).map((value) =>
+    value.length > maxChars ? `${value.slice(0, maxChars - 1)}…` : value
+  );
+}
+
+function uniqueStrings(values) {
+  return [...new Set(stringArray(values))];
+}
+
+function captureMainWorktreeSnapshot(options = {}) {
+  return {
+    label: options.label || "",
+    ...captureGitSnapshot(cwd)
+  };
+}
+
+function assertMainWorktreeUnchanged(snapshot, options = {}) {
+  const label = options.label || snapshot?.label || "main-worktree";
+  const before = snapshot && typeof snapshot === "object" ? snapshot : { ok: false, files: [], hashes: {} };
+  const after = captureGitSnapshot(cwd);
+  const beforeHashes = before.hashes && typeof before.hashes === "object" ? before.hashes : {};
+  const afterHashes = after.hashes && typeof after.hashes === "object" ? after.hashes : {};
+  const beforeFiles = new Set(Object.keys(beforeHashes));
+  const afterFiles = new Set(Object.keys(afterHashes));
+  const added = [...afterFiles].filter((file) => !beforeFiles.has(file)).sort();
+  const removed = [...beforeFiles].filter((file) => !afterFiles.has(file)).sort();
+  const modified = [...afterFiles].filter((file) => beforeFiles.has(file) && beforeHashes[file] !== afterHashes[file]).sort();
+  const files = uniqueStrings([...added, ...removed, ...modified]);
+  const result = {
+    ok: before.ok === true && after.ok === true && files.length === 0,
+    label,
+    before_files: before.files?.length || 0,
+    after_files: after.files?.length || 0,
+    added,
+    removed,
+    modified,
+    files,
+    error: before.error || after.error || undefined
+  };
+  emit({
+    type: "worktree_snapshot_check",
+    label,
+    ok: result.ok,
+    files: files.length,
+    file_samples: previewStrings(files, 8, 160),
+    added: added.length,
+    removed: removed.length,
+    modified: modified.length,
+    message: result.error
+  });
+  return result;
+}
+
+function restoreMainWorktreeSnapshot(snapshot, check = null, options = {}) {
+  const label = options.label || snapshot?.label || "main-worktree-restore";
+  const before = snapshot && typeof snapshot === "object" ? snapshot : { ok: false, files: [], hashes: {}, contents: {} };
+  const detected = check && typeof check === "object" ? check : assertMainWorktreeUnchanged(snapshot, { label: `${label}-precheck` });
+  const contents = before.contents && typeof before.contents === "object" ? before.contents : {};
+  const restored = [];
+  const removed = [];
+  const errors = [];
+
+  for (const file of stringArray(detected.added)) {
+    try {
+      rmSync(`${cwd}/${file}`, { force: true });
+      removed.push(file);
+    } catch (error) {
+      errors.push(`${file}: ${String(error?.message ?? error)}`);
+    }
+  }
+
+  for (const file of uniqueStrings([...(detected.modified || []), ...(detected.removed || [])])) {
+    try {
+      const encoded = contents[file];
+      const path = `${cwd}/${file}`;
+      if (encoded === null || encoded === undefined) {
+        rmSync(path, { force: true });
+        removed.push(file);
+      } else {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, Buffer.from(String(encoded), "base64"));
+        restored.push(file);
+      }
+    } catch (error) {
+      errors.push(`${file}: ${String(error?.message ?? error)}`);
+    }
+  }
+
+  const after = assertMainWorktreeUnchanged(snapshot, { label: `${label}-after` });
+  const result = {
+    ok: errors.length === 0 && after.ok === true,
+    label,
+    restored,
+    removed,
+    errors,
+    after
+  };
+  emit({
+    type: "worktree_snapshot_restore",
+    label,
+    ok: result.ok,
+    restored: restored.length,
+    removed: removed.length,
+    files: uniqueStrings([...restored, ...removed]).length,
+    file_samples: previewStrings([...restored, ...removed], 8, 160),
+    message: errors.join("; ") || undefined
+  });
+  return result;
+}
+
+function captureGitSnapshot(dir) {
+  try {
+    const files = gitChangedFiles(dir);
+    const hashes = {};
+    const contents = {};
+    for (const file of files) {
+      const path = `${dir}/${file}`;
+      if (existsSync(path)) {
+        const content = readFileSync(path);
+        hashes[file] = createHash("sha256").update(content).digest("hex");
+        contents[file] = content.toString("base64");
+      } else {
+        hashes[file] = null;
+        contents[file] = null;
+      }
+    }
+    return { ok: true, files, hashes, contents };
+  } catch (error) {
+    return { ok: false, files: [], hashes: {}, contents: {}, error: String(error?.message ?? error) };
+  }
+}
+
+function gitChangedFiles(dir) {
+  const tracked = execFileSync("git", ["-C", dir, "diff", "--name-only", "HEAD", "--", ...WORKTREE_DIFF_EXCLUDES], {
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024
+  });
+  const untracked = execFileSync("git", ["-C", dir, "ls-files", "--others", "--exclude-standard", "--", ...WORKTREE_DIFF_EXCLUDES], {
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024
+  });
+  return uniqueStrings(`${tracked}\n${untracked}`.split(/\r?\n/));
+}
+
+function runGitApply(args, input) {
+  return runGitApplyIn(cwd, args, input);
+}
+
+function runGitApplyIn(dir, args, input) {
+  try {
+    execFileSync("git", ["-C", dir, ...args], { input, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    return { ok: true, message: "" };
+  } catch (error) {
+    return {
+      ok: false,
+      message: firstText(error?.stderr?.toString?.(), error?.stdout?.toString?.(), error?.message, "git apply failed")
+    };
   }
 }
 
@@ -1395,11 +2106,14 @@ async function dispatchBackend(prompt, options) {
       mockResult.summary = { ...(mockResult.summary || {}), model: String(options.mockResolvedModel) };
     }
     // Mock-only: write the requested file plus an executor-scratch file under
-    // .pandacode/ so the worktree diff-capture + exclusion path is testable for free.
-    if (options.mockWriteFile && options.execCwd) {
-      writeFileSync(`${options.execCwd}/${options.mockWriteFile}`, `mock change by ${options.label || "agent"}\n`);
-      mkdirSync(`${options.execCwd}/.pandacode`, { recursive: true });
-      writeFileSync(`${options.execCwd}/.pandacode/scratch.txt`, "executor metadata that must not pollute the captured diff\n");
+    // .pandacode/ so diff-capture and read-only guards are testable for free.
+    if (options.mockWriteFile) {
+      const mockCwd = options.execCwd || cwd;
+      const mockWritePath = `${mockCwd}/${options.mockWriteFile}`;
+      mkdirSync(dirname(mockWritePath), { recursive: true });
+      writeFileSync(mockWritePath, `mock change by ${options.label || "agent"}\n`);
+      mkdirSync(`${mockCwd}/.pandacode`, { recursive: true });
+      writeFileSync(`${mockCwd}/.pandacode/scratch.txt`, "executor metadata that must not pollute the captured diff\n");
     }
     return mockResult;
   }
@@ -1421,6 +2135,57 @@ function mockResultForSchema(options, prompt) {
   }
   if (schemaName.endsWith("security-finding.schema.json")) {
     return { findings: [], clean_files: [], uncertain: [] };
+  }
+  if (schemaName.endsWith("odw-worktree-review.schema.json")) {
+    const text = String(prompt || "");
+    if (/MOCK_REJECT_ONCE/.test(text)) {
+      const key = options.label || options.id || "review";
+      const seen = mockReviewRejectOnce.get(key) || 0;
+      mockReviewRejectOnce.set(key, seen + 1);
+      if (seen === 0) {
+        const file = text.match(/MOCK_REJECT_ONCE_FILE:([^\s]+)/)?.[1];
+        return {
+          decision: "reject",
+          summary: "mock review rejected the first attempt",
+          blockers: [file ? `mock one-time blocker in ${file}` : "mock one-time blocker"],
+          risks: [],
+          owner_questions: [],
+          verification: ["mock preflight passed"],
+          files_reviewed: []
+        };
+      }
+    }
+    if (/MOCK_NEEDS_OWNER/.test(text)) {
+      return {
+        decision: "needs_owner",
+        summary: "mock review needs owner decision",
+        blockers: [],
+        risks: ["mock owner-sensitive product decision"],
+        owner_questions: ["mock owner question"],
+        verification: ["mock preflight passed"],
+        files_reviewed: []
+      };
+    }
+    if (/\bMOCK_REJECT\b/.test(text)) {
+      return {
+        decision: "reject",
+        summary: "mock review rejected the batch",
+        blockers: ["mock blocker"],
+        risks: [],
+        owner_questions: [],
+        verification: ["mock preflight passed"],
+        files_reviewed: []
+      };
+    }
+    return {
+      decision: "approve",
+      summary: "mock review approved the batch",
+      blockers: [],
+      risks: [],
+      owner_questions: [],
+      verification: ["mock preflight passed"],
+      files_reviewed: []
+    };
   }
   if (schemaName.endsWith("codex-plan.schema.json")) {
     return {
@@ -1474,7 +2239,7 @@ function mockResultForSchema(options, prompt) {
       changed_files: [],
       verification: [],
       risks: [],
-      adapter: { backend: backend === "mock" ? "mock" : "pandacode", runtime: options.runtime || inferPandaRuntime(options) },
+      adapter: { backend: "pandacode", runtime: options.runtime || inferPandaRuntime(options) },
       error: null
     };
   }
@@ -2330,6 +3095,12 @@ function workflowSandboxGlobals(workflowInput) {
     budget: globalThis.budget,
     odw: globalThis.odw,
     pandacode: globalThis.pandacode,
+    applyWorktreeDiff: globalThis.applyWorktreeDiff,
+    applyWorktreeDiffs: globalThis.applyWorktreeDiffs,
+    reviewWorktreeDiffs: globalThis.reviewWorktreeDiffs,
+    captureMainWorktreeSnapshot: globalThis.captureMainWorktreeSnapshot,
+    assertMainWorktreeUnchanged: globalThis.assertMainWorktreeUnchanged,
+    restoreMainWorktreeSnapshot: globalThis.restoreMainWorktreeSnapshot,
     workflow: globalThis.workflow,
     setTimeout,
     clearTimeout,

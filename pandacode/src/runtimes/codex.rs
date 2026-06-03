@@ -109,7 +109,7 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
     let (ok, state, final_summary, execute_report) = if output.ok {
         if let Some(run_id) = record.run_id.as_deref() {
             if is_needs_input(raw.as_ref()) {
-                set_pending_stage(&mut record, Some("start"));
+                set_pending_input(&mut record, Some("start"), raw.as_ref());
                 (
                     false,
                     codex_state(raw.as_ref()),
@@ -130,7 +130,7 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
                 let execute_raw = parse_json_or_null(&execute_output.stdout);
                 update_record_ids(&mut record, execute_raw.as_ref());
                 if is_needs_input(execute_raw.as_ref()) {
-                    set_pending_stage(&mut record, Some("execute"));
+                    set_pending_input(&mut record, Some("execute"), execute_raw.as_ref());
                 } else {
                     set_pending_stage(&mut record, None);
                 }
@@ -287,7 +287,7 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
     );
     let (ok, state, final_summary, execute_report) = if output.ok {
         if is_needs_input(raw.as_ref()) {
-            set_pending_stage(&mut record, Some("send"));
+            set_pending_input(&mut record, Some("send"), raw.as_ref());
             (
                 false,
                 codex_state(raw.as_ref()),
@@ -308,7 +308,7 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
             let execute_raw = parse_json_or_null(&execute_output.stdout);
             update_record_ids(&mut record, execute_raw.as_ref());
             if is_needs_input(execute_raw.as_ref()) {
-                set_pending_stage(&mut record, Some("execute"));
+                set_pending_input(&mut record, Some("execute"), execute_raw.as_ref());
             } else {
                 set_pending_stage(&mut record, None);
             }
@@ -359,7 +359,15 @@ fn answer(args: AnswerCommandArgs) -> Result<()> {
     let run_id = require_run_id(&record)?;
     let control = record_codex_control(&root, &record)?;
     let pending_stage = pending_stage(&record);
-    let command = codex_answer_command(&args.bins, &run_id, &root, &control, &args)?;
+    let pending_question_id = pending_question_id(&record);
+    let command = codex_answer_command(
+        &args.bins,
+        &run_id,
+        &root,
+        &control,
+        &args,
+        pending_question_id.as_deref(),
+    )?;
     let output = run_capture(&command, Some(&root))?;
     let raw = parse_json_or_null(&output.stdout);
     update_record_ids(&mut record, raw.as_ref());
@@ -378,7 +386,7 @@ fn answer(args: AnswerCommandArgs) -> Result<()> {
     let mut state = codex_state(raw.as_ref());
 
     if output.ok && args.wait && is_needs_input(raw.as_ref()) {
-        set_pending_stage(&mut record, pending_stage.as_deref());
+        set_pending_input(&mut record, pending_stage.as_deref(), raw.as_ref());
         ok = false;
     } else if output.ok
         && args.wait
@@ -394,7 +402,7 @@ fn answer(args: AnswerCommandArgs) -> Result<()> {
         let execute_raw = parse_json_or_null(&execute_output.stdout);
         update_record_ids(&mut record, execute_raw.as_ref());
         if is_needs_input(execute_raw.as_ref()) {
-            set_pending_stage(&mut record, Some("execute"));
+            set_pending_input(&mut record, Some("execute"), execute_raw.as_ref());
         } else {
             set_pending_stage(&mut record, None);
         }
@@ -773,6 +781,15 @@ fn pending_stage(record: &SessionRecord) -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn pending_question_id(record: &SessionRecord) -> Option<String> {
+    record
+        .artifacts
+        .get("pending_question_id")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .map(ToString::to_string)
+}
+
 fn set_pending_stage(record: &mut SessionRecord, stage: Option<&str>) {
     if !record.artifacts.is_object() {
         record.artifacts = json!({});
@@ -782,6 +799,25 @@ fn set_pending_stage(record: &mut SessionRecord, stage: Option<&str>) {
             object.insert("pending_stage".to_string(), json!(stage));
         } else {
             object.remove("pending_stage");
+            object.remove("pending_question_id");
+            object.remove("pending_question");
+        }
+    }
+}
+
+fn set_pending_input(record: &mut SessionRecord, stage: Option<&str>, raw: Option<&Value>) {
+    set_pending_stage(record, stage);
+    if !record.artifacts.is_object() {
+        record.artifacts = json!({});
+    }
+    if let Some(object) = record.artifacts.as_object_mut() {
+        object.remove("pending_question_id");
+        object.remove("pending_question");
+        if let Some(question_id) = first_question_id(raw) {
+            object.insert("pending_question_id".to_string(), json!(question_id));
+        }
+        if let Some(question_text) = first_question_text(raw) {
+            object.insert("pending_question".to_string(), json!(question_text));
         }
     }
 }
@@ -791,7 +827,11 @@ fn first_pending_question_id(
     run_id: &str,
     root: &Path,
     control: &CodexControl,
+    known_question_id: Option<&str>,
 ) -> Result<String> {
+    if let Some(question_id) = known_question_id.and_then(non_empty_string) {
+        return Ok(question_id.to_string());
+    }
     let command = codex_read_command(bins, run_id, control, false);
     let output = run_capture(&command, Some(root))?;
     if !output.ok {
@@ -801,18 +841,44 @@ fn first_pending_question_id(
         );
     }
     let raw = parse_json_or_null(&output.stdout);
-    first_question_id(raw.as_ref()).ok_or_else(|| {
+    if let Some(question_id) = first_question_id(raw.as_ref()) {
+        return Ok(question_id);
+    }
+
+    let full_command = codex_read_command(bins, run_id, control, true);
+    let full_output = run_capture(&full_command, Some(root))?;
+    if !full_output.ok {
+        bail!(
+            "codexctl session read --full failed before answering: {}",
+            full_output.stderr.trim()
+        );
+    }
+    let full_raw = parse_json_or_null(&full_output.stdout);
+    first_question_id(full_raw.as_ref()).ok_or_else(|| {
         anyhow::anyhow!(
             "cannot infer Codex question id for --text; pass --choice N or --text '{{...}}'"
         )
     })
 }
 
+fn non_empty_string(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 fn first_question_id(raw: Option<&Value>) -> Option<String> {
-    let question = raw?
-        .get("questions")
-        .and_then(|value| value.as_array())
-        .and_then(|questions| questions.first())?;
+    let raw = raw?;
+    for key in [
+        "pending_question_id",
+        "pendingQuestionId",
+        "question_id",
+        "questionId",
+    ] {
+        if let Some(value) = raw.get(key).and_then(|value| value.as_str()) {
+            return Some(value.to_string());
+        }
+    }
+    let question = first_question(raw)?;
     for key in ["id", "question_id", "questionId", "key", "name"] {
         if let Some(value) = question.get(key).and_then(|value| value.as_str()) {
             return Some(value.to_string());
@@ -822,6 +888,25 @@ fn first_question_id(raw: Option<&Value>) -> Option<String> {
         .get("question")
         .and_then(|value| value.as_str())
         .map(ToString::to_string)
+}
+
+fn first_question_text(raw: Option<&Value>) -> Option<String> {
+    let question = first_question(raw?)?;
+    for key in ["question", "prompt", "text", "message", "title"] {
+        if let Some(value) = question.get(key).and_then(|value| value.as_str()) {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn first_question(raw: &Value) -> Option<&Value> {
+    raw.get("questions").and_then(|value| {
+        value
+            .as_array()
+            .and_then(|questions| questions.first())
+            .or_else(|| value.as_object().map(|_| value))
+    })
 }
 
 fn string_field<'a>(value: &'a serde_json::Value, names: &[&str]) -> Option<&'a str> {
@@ -979,6 +1064,7 @@ fn codex_answer_command(
     root: &Path,
     control: &CodexControl,
     args: &AnswerCommandArgs,
+    pending_question_id: Option<&str>,
 ) -> Result<Vec<String>> {
     let mut command = vec![
         bins.codexctl_bin.clone(),
@@ -1001,7 +1087,8 @@ fn codex_answer_command(
             {
                 command.extend(["--answers-json".to_string(), text.to_string()]);
             } else {
-                let question_id = first_pending_question_id(bins, run_id, root, control)?;
+                let question_id =
+                    first_pending_question_id(bins, run_id, root, control, pending_question_id)?;
                 command.extend(["--answer".to_string(), format!("{question_id}={text}")]);
             }
         }
@@ -1324,8 +1411,15 @@ mod tests {
             log_dir: PathBuf::from("/repo/.pandacode/codex/runs/s1/logs"),
             session_socket: PathBuf::from("/tmp/pandacode-codex/s1.sock"),
         };
-        let command =
-            codex_answer_command(&args.bins, "run_1", Path::new("/repo"), &control, &args).unwrap();
+        let command = codex_answer_command(
+            &args.bins,
+            "run_1",
+            Path::new("/repo"),
+            &control,
+            &args,
+            None,
+        )
+        .unwrap();
         assert!(command.windows(2).any(|pair| pair == ["session", "answer"]));
         assert!(command.contains(&"--run-id".to_string()));
         assert!(command.contains(&"run_1".to_string()));
@@ -1333,6 +1427,35 @@ mod tests {
         assert!(command.contains(&"--pick".to_string()));
         assert!(command.contains(&"2".to_string()));
         assert!(!command.contains(&"--detach".to_string()));
+    }
+
+    #[test]
+    fn builds_codex_text_answer_from_recorded_pending_question() {
+        let args = AnswerCommandArgs {
+            session: "latest".to_string(),
+            cd: PathBuf::from("/repo"),
+            choice: None,
+            text: Some("main".to_string()),
+            wait: true,
+            timeout_ms: Some(30_000),
+            json: false,
+            bins: bins(),
+        };
+        let control = CodexControl {
+            log_dir: PathBuf::from("/repo/.pandacode/codex/runs/s1/logs"),
+            session_socket: PathBuf::from("/tmp/pandacode-codex/s1.sock"),
+        };
+        let command = codex_answer_command(
+            &args.bins,
+            "run_1",
+            Path::new("/repo"),
+            &control,
+            &args,
+            Some("question-1"),
+        )
+        .unwrap();
+        assert!(command.contains(&"--answer".to_string()));
+        assert!(command.contains(&"question-1=main".to_string()));
     }
 
     #[test]

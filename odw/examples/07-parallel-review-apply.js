@@ -1,0 +1,508 @@
+// Example 07 — parallel Codex worktrees, structured review gate, atomic landing.
+//
+// This is the reusable large-project shape:
+//
+//   parallel implementation worktrees
+//     -> reviewWorktreeDiffs(...) in a temporary candidate worktree
+//     -> applyWorktreeDiffs(...) atomically only after approve
+//     -> final verification in the main working directory
+//
+// It intentionally lands changes into the cwd when the review gate approves.
+// Run it from a disposable git repo or the project you actually want to change:
+//
+//   mkdir /tmp/odw-example && cd /tmp/odw-example && git init && git commit --allow-empty -m init
+//   odw exec --script /path/to/odw/examples/07-parallel-review-apply.js --backend mock --json
+//
+// Real run:
+//
+//   odw exec --script /path/to/odw/examples/07-parallel-review-apply.js \
+//     --backend pandacode \
+//     --input '{"test":"npm test","tasks":[{"id":"docs","file":"docs/agent-loop.md","prompt":"Create docs/agent-loop.md explaining the agent loop."}]}'
+
+export const meta = {
+  name: "parallel-review-apply",
+  description: "Implement independent tasks in worktrees, review the combined candidate, then land atomically.",
+  phases: [
+    { title: "Implement" },
+    { title: "Review Gate" },
+    { title: "Repair" },
+    { title: "Land" },
+    { title: "Verify" },
+  ],
+};
+
+export default async function workflow() {
+  const DEFAULT_TASKS = [
+    {
+      id: "owner-loop",
+      file: "docs/owner-loop.md",
+      prompt: "Create docs/owner-loop.md explaining how owner comments become AI implementation tasks.",
+    },
+    {
+      id: "review-policy",
+      file: "docs/review-policy.md",
+      prompt: "Create docs/review-policy.md explaining approve/reject/needs_owner review outcomes.",
+    },
+  ];
+
+  const TASKS = Array.isArray(args?.tasks) && args.tasks.length ? args.tasks : DEFAULT_TASKS;
+  const TEST = args?.test || "echo 'no test command configured'";
+  const maxReviewRounds = Math.max(1, Math.min(4, Number(args?.maxReviewRounds || 2)));
+  const strictTaskFileBoundaries = args?.strictTaskFileBoundaries !== false;
+  const allowDirtyTaskFiles = args?.allowDirtyTaskFiles === true;
+  const taskBrief = TASKS.map(
+    (task) => `- ${task.id}: ${task.file || "(files from prompt)"} — ${task.prompt}`
+  ).join("\n");
+  const runContext =
+    args?.context ||
+    "Large-project default: land low-risk, internally consistent changes with verification evidence.";
+  const reviewContext = `Caller-provided context and task prompts are the owner-provided product intent for this run.
+
+Run context:
+${runContext}
+
+Planned tasks:
+${taskBrief}`;
+  const reviewCriteria = args?.criteria || [
+    "Treat the run context and task prompts as the acceptance intent for this batch.",
+    "Approve when the candidate satisfies that stated intent, applies cleanly, and has adequate verification evidence.",
+    "Use needs_owner only when the candidate makes a consequential product choice not present in the run context or task prompts, or when the stated intent conflicts with repository evidence.",
+    "Reject when there are blockers, failed verification, semantic conflicts, or unsafe/unrelated edits.",
+  ];
+
+  const implementationPrompt = (task, repairFeedback) => `${task.prompt}
+
+${repairFeedback ? `Review feedback to address before returning:\n${repairFeedback}\n` : ""}
+Constraints:
+- Only edit the files needed for this task${taskFiles(task).length ? `: ${taskFiles(task).join(", ")}` : ""}.
+- Keep the change independently reviewable.
+- Do not claim defaults or generated files that are not directly true from the task context or project evidence.
+- Run this verification if relevant: ${task.verify || TEST}
+- Final response: one concise sentence with changed files and verification result.`;
+
+  const taskFiles = (task) => {
+    const files = [];
+    if (task?.file) {
+      files.push(task.file);
+    }
+    if (Array.isArray(task?.files)) {
+      files.push(...task.files.filter(Boolean));
+    }
+    return [...new Set(files)];
+  };
+
+  const fileOwner = new Map();
+  for (const task of TASKS) {
+    for (const file of taskFiles(task)) {
+      fileOwner.set(file, task);
+    }
+  }
+
+  const startSnapshot = captureMainWorktreeSnapshot({ label: "starter-preflight" });
+  const dirtyTaskFiles = allowDirtyTaskFiles
+    ? []
+    : startSnapshot.files.filter((file) => fileOwner.has(file));
+  if (dirtyTaskFiles.length > 0) {
+    return {
+      ok: false,
+      error: {
+        category: "dirty_task_files",
+        message:
+          "Task files already have uncommitted changes. Isolated worktrees branch from HEAD and would not see those changes.",
+      },
+      dirtyTaskFiles,
+      hint:
+        "Commit or stash the listed task files before running this starter again, or pass allowDirtyTaskFiles:true with explicit owner intent.",
+    };
+  }
+
+  const runImplementationRound = async (round, repairFeedback = "", roundTasks = TASKS) => {
+    const isRepair = round > 1;
+    const activeTasks = Array.isArray(roundTasks) && roundTasks.length ? roundTasks : TASKS;
+    phase(
+      isRepair ? "Repair" : "Implement",
+      isRepair
+        ? `Redo ${activeTasks.length} rejected task(s) from clean worktrees using review feedback (round ${round}/${maxReviewRounds}).`
+        : "Fan out independent Codex tasks into isolated worktrees."
+    );
+    const results = await parallel(
+      activeTasks.map((task) => () =>
+        agent(implementationPrompt(task, repairFeedback), {
+          id: isRepair ? `${task.id}-repair-${round - 1}` : task.id,
+          label: isRepair ? `repair:${task.id}` : `impl:${task.id}`,
+          runtime: task.runtime || "codex",
+          isolation: "worktree",
+          permission: task.permission || "max",
+          // Mock backend only: makes the dry run produce a real captured diff.
+          mockWriteFile: task.mockFile || task.file,
+          mockFail: Boolean(task.mockFail),
+        })
+      ),
+      { label: isRepair ? `repair-${round - 1}` : "implement" }
+    );
+    const annotated = activeTasks.map((task, index) => ({ task, result: results[index] }));
+    const candidates = annotated
+      .filter(({ result }) => result?.worktree?.changed)
+      .map(({ task, result }) => ({
+        ...result,
+        taskId: task.id,
+        taskFile: task.file || null,
+        taskFiles: taskFiles(task),
+      }));
+    const failedTasks = annotated
+      .filter(({ result }) => !result || result?.ok === false)
+      .map(({ task, result }) => ({
+        task,
+        message:
+          result?.error?.message ||
+          result?.feedback?.user_message ||
+          result?.text ||
+          "implementation node failed or returned no result",
+      }));
+    const scopeIssues = strictTaskFileBoundaries
+      ? candidates.flatMap((candidate) => {
+          const task = activeTasks.find((item) => item.id === candidate.taskId);
+          const allowed = new Set(taskFiles(task));
+          if (allowed.size === 0) {
+            return [];
+          }
+          return (candidate.worktree?.files || [])
+            .filter((file) => !allowed.has(file))
+            .map((file) => ({
+              task,
+              file,
+              ownerTask: fileOwner.get(file) || null,
+            }));
+        })
+      : [];
+    log(
+      (isRepair ? "repair " : "") +
+        "candidate files=" +
+        candidates.flatMap((result) => result.worktree.files).join("|")
+    );
+    return { activeTasks, annotated, candidates, failedTasks, scopeIssues, results };
+  };
+
+  const implementationFeedback = (issues) => {
+    const failed = (issues?.failedTasks || [])
+      .map((item) => `failed_task: ${item.task.id} (${item.task.file || "no file"}) — ${item.message}`)
+      .join("\n");
+    const scope = (issues?.scopeIssues || [])
+      .map((item) => {
+        const owner = item.ownerTask ? `; owned_by=${item.ownerTask.id}` : "";
+        return `scope_violation: task ${item.task.id} touched ${item.file}${owner}`;
+      })
+      .join("\n");
+    return `Pre-review implementation gate blocked this batch before reviewer agents ran.
+${failed}
+${scope}
+
+Repair only the listed task files. If multiple tasks need coordinated changes, keep each task inside its declared file list or set args.strictTaskFileBoundaries=false with explicit owner intent.`.slice(0, args?.maxRepairFeedbackChars || 12000);
+  };
+
+  const implementationIssues = (implementation) => {
+    const tasks = new Map();
+    for (const item of implementation?.failedTasks || []) {
+      tasks.set(item.task.id, item.task);
+    }
+    for (const issue of implementation?.scopeIssues || []) {
+      tasks.set(issue.task.id, issue.task);
+      if (issue.ownerTask) {
+        tasks.set(issue.ownerTask.id, issue.ownerTask);
+      }
+    }
+    return {
+      failedTasks: implementation?.failedTasks || [],
+      scopeIssues: implementation?.scopeIssues || [],
+      tasks: [...tasks.values()],
+    };
+  };
+
+  const reviewFeedback = (gate) => {
+    const reviewLines = (gate?.reviews || [])
+      .map((review) => {
+        const parts = [
+          `Reviewer ${review.reviewer || "review"} decision=${review.decision || "unknown"}`,
+          review.summary ? `summary: ${review.summary}` : "",
+          ...(review.blockers || []).map((item) => `blocker: ${item}`),
+          ...(review.risks || []).map((item) => `risk: ${item}`),
+          ...(review.verification || []).map((item) => `verification: ${item}`),
+        ].filter(Boolean);
+        return parts.join("\n");
+      })
+      .join("\n\n");
+    const ownerQuestions = (gate?.owner_questions || []).map((item) => `owner_question: ${item}`).join("\n");
+    return `Previous review decision: ${gate?.decision || "unknown"}
+${(gate?.blockers || []).map((item) => `Blocking issue: ${item}`).join("\n")}
+${ownerQuestions}
+
+Reviewer evidence:
+${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
+  };
+
+  const tasksForReviewRepair = (gate) => {
+    const blockerText = [
+      ...(gate?.blockers || []),
+      ...(gate?.reviews || []).flatMap((review) => review.blockers || []),
+    ].join("\n");
+    const tasksWithFiles = TASKS.filter((task) => task.file);
+    if (!blockerText || tasksWithFiles.length === 0) {
+      return TASKS;
+    }
+    const matched = tasksWithFiles.filter((task) => blockerText.includes(task.file));
+    return matched.length > 0 ? matched : TASKS;
+  };
+
+  const candidateTouchesTask = (candidate, task) =>
+    taskFiles(task).some((file) => candidate?.worktree?.files?.includes(file));
+
+  const candidateFiles = (items) =>
+    [...new Set((items || []).flatMap((candidate) => candidate?.worktree?.files || []))];
+  const summarizeGate = (round, label, value) => ({
+    round,
+    label,
+    decision: value?.decision,
+    applyReady: value?.applyReady === true,
+    files: value?.files || [],
+    reviewers: (value?.reviews || []).map((review) => ({
+      reviewer: review.reviewer,
+      decision: review.decision,
+      summary: review.summary,
+      blockers: review.blockers || [],
+      risks: review.risks || [],
+      owner_questions: review.owner_questions || [],
+      verification: review.verification || [],
+    })),
+    blockers: value?.blockers || [],
+    risks: value?.risks || [],
+    owner_questions: value?.owner_questions || [],
+    verification: value?.verification || [],
+  });
+
+  const history = [];
+  let implementation = await runImplementationRound(1);
+  let candidates = implementation.candidates;
+  history.push({
+    step: "implement",
+    round: 1,
+    tasks: TASKS.map((task) => task.id),
+    files: candidateFiles(candidates),
+  });
+
+  if (candidates.length === 0) {
+    return { ok: false, error: "no captured worktree changes", history, results: implementation.results };
+  }
+
+  let gate = null;
+  for (let round = 1; round <= maxReviewRounds; round += 1) {
+    const preReviewIssues = implementationIssues(implementation);
+    if (preReviewIssues.tasks.length > 0) {
+      history.push({
+        step: "pre_review_block",
+        round,
+        failed_tasks: preReviewIssues.failedTasks.map((item) => ({
+          id: item.task.id,
+          file: item.task.file || null,
+          message: item.message,
+        })),
+        scope_issues: preReviewIssues.scopeIssues.map((item) => ({
+          task: item.task.id,
+          file: item.file,
+          owner_task: item.ownerTask?.id || null,
+        })),
+      });
+      if (round >= maxReviewRounds) {
+        return {
+          ok: false,
+          error: {
+            category: "implementation_pre_review_blocked",
+            message: "Implementation tasks failed or crossed task file boundaries before review.",
+          },
+          history,
+          results: implementation.results,
+        };
+      }
+      const repairTasks = preReviewIssues.tasks;
+      log("pre-review repairing tasks=" + repairTasks.map((task) => task.id).join("|"));
+      const retainedCandidates =
+        repairTasks.length === TASKS.length
+          ? []
+          : candidates.filter((candidate) => !repairTasks.some((task) => candidateTouchesTask(candidate, task)));
+      history.push({
+        step: "repair_plan",
+        reason: "pre_review_block",
+        round: round + 1,
+        tasks: repairTasks.map((task) => task.id),
+        retained_files: candidateFiles(retainedCandidates),
+      });
+      implementation = await runImplementationRound(round + 1, implementationFeedback(preReviewIssues), repairTasks);
+      candidates = [...retainedCandidates, ...implementation.candidates];
+      history.push({
+        step: "repair",
+        reason: "pre_review_block",
+        round: round + 1,
+        tasks: repairTasks.map((task) => task.id),
+        files: candidateFiles(implementation.candidates),
+        candidate_files: candidateFiles(candidates),
+      });
+      if (candidates.length === 0) {
+        return { ok: false, error: "no captured worktree changes after pre-review repair", history, results: implementation.results };
+      }
+      continue;
+    }
+
+    const gateLabel = round === 1 ? "batch-review" : `batch-review-r${round}`;
+    phase(
+      "Review Gate",
+      round === 1
+        ? "Review the combined candidate before landing."
+        : `Re-review the repaired candidate before landing (round ${round}/${maxReviewRounds}).`
+    );
+    gate = await reviewWorktreeDiffs(candidates, {
+      label: gateLabel,
+      context: reviewContext,
+      criteria: reviewCriteria,
+      reviewers:
+        args?.reviewers || [
+          {
+            label: "correctness",
+            runtime: "codex",
+            perspective: "Correctness, regression risk, and test evidence.",
+          },
+          {
+            label: "owner-risk",
+            runtime: "codex",
+            perspective:
+              "Owner decision risk after treating run context and task prompts as owner-provided intent; do not ask the owner to reconfirm already stated intent.",
+          },
+        ],
+      maxDiffChars: args?.maxDiffChars || 50000,
+    });
+    history.push({ step: "review", ...summarizeGate(round, gateLabel, gate) });
+
+    if (gate.applyReady) {
+      break;
+    }
+
+    if (gate.decision === "needs_owner" || round >= maxReviewRounds) {
+      return { ok: false, gate, history, results: implementation.results };
+    }
+
+    const repairTasks = tasksForReviewRepair(gate);
+    log("repairing tasks=" + repairTasks.map((task) => task.id).join("|"));
+    const retainedCandidates =
+      repairTasks.length === TASKS.length
+        ? []
+        : candidates.filter((candidate) => !repairTasks.some((task) => candidateTouchesTask(candidate, task)));
+    history.push({
+      step: "repair_plan",
+      round: round + 1,
+      tasks: repairTasks.map((task) => task.id),
+      retained_files: candidateFiles(retainedCandidates),
+    });
+    implementation = await runImplementationRound(round + 1, reviewFeedback(gate), repairTasks);
+    candidates = [...retainedCandidates, ...implementation.candidates];
+    history.push({
+      step: "repair",
+      round: round + 1,
+      tasks: repairTasks.map((task) => task.id),
+      files: candidateFiles(implementation.candidates),
+      candidate_files: candidateFiles(candidates),
+    });
+    if (implementation.candidates.length === 0) {
+      return { ok: false, error: "no captured worktree changes after repair", gate, history, results: implementation.results };
+    }
+  }
+
+  if (!gate?.applyReady) {
+    return { ok: false, gate, history, results: implementation.results };
+  }
+
+  phase("Land", "Apply approved captured patches atomically.");
+  const landed = applyWorktreeDiffs(candidates, { label: "approved-batch" });
+  if (!landed.ok) {
+    return { ok: false, gate, history, landed };
+  }
+
+  phase("Verify", "Verify the landed main working directory.");
+  const verifySnapshot = captureMainWorktreeSnapshot({ label: "before-final-verify" });
+  const verification = await agent(
+    `Read-only verification for the approved batch now landed in the main working directory.
+
+Tasks:
+${TASKS.map((task) => `- ${task.id}: ${task.file || "(files from prompt)"}`).join("\n")}
+
+Run this command and report the exact result:
+${TEST}
+
+Do not modify files, install dependencies, format code, or apply fixes. If verification fails, report the failure and evidence; do not repair it in this step.`,
+    {
+      id: "verify-landed",
+      label: "verify-landed",
+      runtime: "codex",
+      permission: "limited",
+      mockWriteFile: args?.verifyMockWriteFile,
+      mockFail: Boolean(args?.verifyMockFail),
+    }
+  );
+  const verifyGuard = assertMainWorktreeUnchanged(verifySnapshot, { label: "final-verify-readonly" });
+  const verificationOk = verification?.ok !== false;
+  history.push({
+    step: "verify",
+    ok: verificationOk && verifyGuard.ok,
+    guard: {
+      ok: verifyGuard.ok,
+      files: verifyGuard.files,
+      added: verifyGuard.added,
+      removed: verifyGuard.removed,
+      modified: verifyGuard.modified,
+    },
+  });
+
+  if (!verifyGuard.ok) {
+    const verifyRestore = restoreMainWorktreeSnapshot(verifySnapshot, verifyGuard, { label: "final-verify-restore" });
+    history[history.length - 1].restore = {
+      ok: verifyRestore.ok,
+      restored: verifyRestore.restored,
+      removed: verifyRestore.removed,
+      errors: verifyRestore.errors,
+    };
+    return {
+      ok: false,
+      error: {
+        category: "verification_mutated_worktree",
+        message: "Final verification changed the main worktree after approve-only landing.",
+      },
+      gate,
+      history,
+      landed,
+      verification,
+      verifyGuard,
+      verifyRestore,
+    };
+  }
+
+  if (!verificationOk) {
+    return {
+      ok: false,
+      error: {
+        category: "verification_failed",
+        message: "Final verification returned ok:false after approve-only landing.",
+      },
+      gate,
+      history,
+      landed,
+      verification,
+      verifyGuard,
+    };
+  }
+
+  return {
+    ok: true,
+    gate,
+    history,
+    landed,
+    verification,
+    verifyGuard,
+  };
+}

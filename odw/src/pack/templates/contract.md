@@ -2,9 +2,30 @@
 
 This file is a contract for agents that write Open Dynamic Workflow scripts.
 
-The primary runtime is `odw exec`. Claude Code can still call the same scripts
-through `/odw`, but slash commands are compatibility entrypoints, not the
-required trigger.
+The primary runtime is `odw exec`. External agents such as Claude Code or Codex
+can call the same CLI and scripts, but ODW itself does not install slash commands
+or project files.
+
+For a built-in large-project workflow template, run:
+
+```bash
+odw starter parallel-review-apply > wf.js
+```
+
+That starter fans out isolated Codex worktrees, reviews the combined candidate
+in a temporary worktree, repairs reviewer-rejected batches up to
+`args.maxReviewRounds` (default 2), targets blocker-matched task files when
+possible, lands only `approve` gates atomically, and then verifies the main
+working directory under a read-only snapshot guard. If final verification
+modifies files after approval, the run restores those unapproved changes and
+fails instead of bypassing review.
+Before review, it blocks failed implementation nodes and cross-owned file edits.
+Use `task.file` or `task.files` to declare each task's ownership; set
+`strictTaskFileBoundaries:false` only with explicit owner intent.
+Because isolated worktrees branch from `HEAD`, it also blocks dirty declared
+task files before implementation; commit/stash them first, or set
+`allowDirtyTaskFiles:true` only when the owner accepts that workers will not see
+those uncommitted changes.
 
 ## Required concepts
 
@@ -19,6 +40,11 @@ required trigger.
 - `checkpoint`: persist a resume boundary for `odw exec --resume`
 - `parallel`: fan out independent agents
 - `pipeline`: pass verified outputs from one phase to the next
+- `reviewWorktreeDiffs`: review captured worktree patches before landing; ODW
+  preflights the combined patch, applies it inside a temporary candidate
+  worktree, and runs structured reviewer agents there
+- `applyWorktreeDiffs`: atomically apply captured worktree patches to the main
+  cwd after review; partial landing requires explicit `continueOnError:true`
 - `verify`: adversarial review before synthesis
 - `synthesize`: final answer returned to the caller
 
@@ -51,6 +77,13 @@ then use `fanout(tasks, (task, index) => agent(...))`. Each child should have a
 stable `id` derived from the task.
 
 For staged item streams, use `pipeline(items, ...stages)`.
+
+For parallel file edits, run mutating nodes with `isolation: "worktree"`, then
+call `reviewWorktreeDiffs(results, opts)` before `applyWorktreeDiffs(results)`.
+Only a review gate with `decision: "approve"` / `applyReady: true` should be
+auto-landed. `reject` means rework first, preferably by running a fresh isolated
+worktree round with reviewer feedback; `needs_owner` means ask the product/code
+owner before applying.
 
 ODW does not create default nodes or apply a default schema. The workflow
 author decides the flow with ordinary JavaScript plus `agent(...)`,
@@ -163,12 +196,9 @@ When launched through `odw exec`, ODW records:
 - full event journal at `.odw/runs/<run_id>/events.jsonl`
 - direct resume state at `.odw/runs/<run_id>/state.json`
 - raw script stderr at `.odw/runs/<run_id>/script-debug.log`
+- run metadata at `.odw/runs/<run_id>/run.json`
+- HTML report at `.odw/runs/<run_id>/report.html` when report generation is enabled
 - `odw exec --resume latest`
-
-Claude Code's `/workflows` surface remains available for Claude-launched runs.
-
-Use `odw workflows remove <name>` to remove saved Open Dynamic Workflow templates from
-the filesystem.
 
 ## PandaCode backend decision
 

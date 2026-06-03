@@ -97,6 +97,47 @@ exit 2
     );
 }
 
+fn fake_codexctl_needs_input_without_read_questions(path: &Path) {
+    write_exe(
+        path,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "--help" ]]; then
+  echo "fake codexctl help"
+  exit 0
+fi
+if [[ "${1:-}" == "models" ]]; then
+  printf '{"models":[{"id":"gpt-5.5","efforts":["low","medium","high","xhigh"]}]}\n'
+  exit 0
+fi
+if [[ "${1:-}" == "session" ]]; then
+  action="${2:-}"
+  case "$action" in
+    start)
+      printf '{"run_id":"run_needs_input","thread_id":"thread_fake","thread_path":"/tmp/thread.jsonl","status":"needs_input","current_phase":"needs_input","last_agent_message":"Need a decision","questions":[{"question":"How should this continue?"}]}\n'
+      ;;
+    read)
+      printf '{"run_id":"run_needs_input","status":"needs_input","current_phase":"needs_input","last_agent_message":"Need a decision","questions":[]}\n'
+      ;;
+    answer)
+      printf '{"run_id":"run_needs_input","status":"completed","current_phase":"completed","last_agent_message":"answered"}\n'
+      ;;
+    execute)
+      printf '{"run_id":"run_needs_input","status":"completed","current_phase":"completed","last_agent_message":"implemented"}\n'
+      ;;
+    *)
+      echo "unknown session action $action" >&2
+      exit 2
+      ;;
+  esac
+  exit 0
+fi
+echo "unknown fake codexctl args: $*" >&2
+exit 2
+"#,
+    );
+}
+
 fn fake_codex(path: &Path) {
     write_exe(
         path,
@@ -1074,6 +1115,87 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_text_answer_uses_recorded_pending_question_when_read_is_sparse() {
+    let root = temp_root("codex-answer-pending");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let codexctl = bin_dir.join("codexctl");
+    let codex = bin_dir.join("codex");
+    fake_codexctl_needs_input_without_read_questions(&codexctl);
+    fake_codex(&codex);
+
+    let common = [
+        "--cd",
+        root.to_str().unwrap(),
+        "--codexctl-bin",
+        codexctl.to_str().unwrap(),
+        "--codex-bin",
+        codex.to_str().unwrap(),
+        "--json",
+    ];
+    let output = Command::new(bin())
+        .args([
+            "codex",
+            "exec",
+            "--session",
+            "needs-input",
+            "--task",
+            "ask then continue",
+        ])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exec: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(exec["state"], "waiting_for_user");
+    assert_eq!(
+        exec["record"]["artifacts"]["pending_question_id"],
+        "How should this continue?"
+    );
+
+    let output = Command::new(bin())
+        .args([
+            "codex",
+            "answer",
+            "--session",
+            "needs-input",
+            "--text",
+            "Proceed",
+            "--wait",
+        ])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["ok"], true);
+    assert_eq!(answer["state"], "completed");
+    assert!(
+        answer["answer"]["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "How should this continue?=Proceed")
+    );
+
+    let record =
+        fs::read_to_string(root.join(".pandacode/sessions/codex/needs-input.json")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+    assert!(record["artifacts"].get("pending_stage").is_none());
+    assert!(record["artifacts"].get("pending_question_id").is_none());
 
     fs::remove_dir_all(root).unwrap();
 }

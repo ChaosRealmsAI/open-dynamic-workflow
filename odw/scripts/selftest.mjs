@@ -1442,6 +1442,52 @@ test("examples: parallel-review-apply repairs root-cause file when blocker start
   }
 });
 
+test("examples: parallel-review-apply includes symbol-named root cause with symptom file", () => {
+  const { dir } = makeGitRepo("odw-example-07-repair-symbol-root-cause-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('symbol root cause repair verify ok')\"",
+      maxReviewRounds: 2,
+      tasks: [
+        {
+          id: "core",
+          file: "src/decision-digest.js",
+          prompt: "Create createDecisionDigest(input) in src/decision-digest.js."
+        },
+        {
+          id: "integration",
+          file: "index.js",
+          prompt: "Update buildProductArtifacts(input) in index.js to call the digest helper."
+        }
+      ],
+      reviewers: [
+        {
+          label: "symbol-root-cause-review",
+          runtime: "codex",
+          perspective:
+            "MOCK_REJECT_ONCE_BLOCKER:index.js shows the symptom, but createDecisionDigest omits represented batch comments from the added bucket."
+        }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `example 07 symbol root-cause repair run failed: ${r.out.slice(-900)}`);
+    assert(/repairing tasks=.*core/.test(r.out), `repair did not include symbol root cause: ${r.out.slice(-900)}`);
+    const result = r.state.result;
+    const repairPlan = result.history.find((item) => item.step === "repair_plan" && item.round === 2);
+    const repairedTasks = new Set(repairPlan?.tasks || []);
+    assert(repairedTasks.has("core"), `repair plan missed symbol root cause: ${JSON.stringify(repairPlan)}`);
+    assert(repairedTasks.has("integration"), `repair plan missed symptom caller: ${JSON.stringify(repairPlan)}`);
+    assert(
+      /mock change by repair:core/.test(readFileSync(join(dir, "src/decision-digest.js"), "utf8")),
+      "symbol root-cause task should land repair candidate"
+    );
+    assert(/mock change by repair:integration/.test(readFileSync(join(dir, "index.js"), "utf8")), "symptom caller should land repair candidate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply defaults to three review rounds for 3+ tasks", () => {
   const { dir } = makeGitRepo("odw-example-07-default-rounds-");
   try {

@@ -322,6 +322,7 @@ ${taskBrief}`;
     "Approve when the candidate satisfies that stated intent, applies cleanly, and has adequate verification evidence.",
     "Use needs_owner only when the candidate makes a consequential product choice not present in the run context or task prompts, or when the stated intent conflicts with repository evidence.",
     "Reject when there are blockers, failed verification, semantic conflicts, or unsafe/unrelated edits.",
+    "When rejecting, include concrete repo file paths for root-cause code when known; do not name only tests, function names, or symptoms.",
   ];
 
   const implementationPrompt = (task, repairFeedback) => `Batch context:
@@ -567,14 +568,15 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
     return /(^test\b|\.test\.|\.spec\.|test-|tests?)/i.test(name);
   };
 
+  const rootCausePhrases =
+    /\b(does not|doesn't|fails to|returns?|drops?|loses?|omits?|filters?|duplicates?|double-counts?|deduplicates?|preserv(?:e|es)|infers?|violates?|contradicts?|documents?|exposes?|missing|required|should|must|cannot|can't|wrong)\b/;
+
   const blockerMatchScore = (text, file, index) => {
     const start = Math.max(0, index - 100);
     const end = Math.min(text.length, index + file.length + 220);
     const around = text.slice(start, end).toLowerCase();
     const after = text.slice(index + file.length, end).toLowerCase();
     let score = 0;
-    const rootCausePhrases =
-      /\b(does not|doesn't|fails to|returns?|drops?|loses?|preserv(?:e|es)|infers?|violates?|contradicts?|documents?|exposes?|missing|required|should|must|cannot|can't|wrong)\b/;
     if (rootCausePhrases.test(after)) {
       score += 100;
     }
@@ -590,6 +592,102 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
       score -= 70;
     }
     return score;
+  };
+
+  const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const extractDefinedSymbols = (diff) => {
+    const symbols = [];
+    for (const line of String(diff || "").split(/\r?\n/)) {
+      if (line.startsWith("-")) {
+        continue;
+      }
+      const text = line.startsWith("+") || line.startsWith(" ") ? line.slice(1) : line;
+      for (const pattern of [
+        /\b(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\b/g,
+        /\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g,
+      ]) {
+        let match = null;
+        while ((match = pattern.exec(text))) {
+          symbols.push(match[1]);
+        }
+      }
+    }
+    return [...new Set(symbols)];
+  };
+
+  const extractPromptOwnedSymbols = (task) => {
+    const prompt = String(task?.prompt || "");
+    const symbols = [];
+    for (const file of taskFiles(task)) {
+      const fileIndex = prompt.indexOf(file);
+      if (fileIndex < 0) {
+        continue;
+      }
+      const nearby = prompt.slice(Math.max(0, fileIndex - 260), fileIndex + file.length + 80);
+      const pattern = /\b([A-Za-z_$][\w$]*)\s*\(/g;
+      let match = null;
+      while ((match = pattern.exec(nearby))) {
+        symbols.push(match[1]);
+      }
+    }
+    return [...new Set(symbols)];
+  };
+
+  const candidateTouchesTask = (candidate, task) =>
+    taskFiles(task).some((file) => candidate?.worktree?.files?.includes(file));
+
+  const candidateForTask = (task) =>
+    (candidates || []).find((candidate) => candidateTouchesTask(candidate, task));
+
+  const taskSymbols = (task) => {
+    const candidate = candidateForTask(task);
+    return [...new Set([
+      ...extractDefinedSymbols(candidate?.worktree?.diff || ""),
+      ...extractPromptOwnedSymbols(task),
+    ])];
+  };
+
+  const symbolMatchScore = (text, symbol, index) => {
+    const start = Math.max(0, index - 100);
+    const end = Math.min(text.length, index + symbol.length + 220);
+    const around = text.slice(start, end).toLowerCase();
+    const after = text.slice(index + symbol.length, end).toLowerCase();
+    let score = 80;
+    if (rootCausePhrases.test(after)) {
+      score += 100;
+    }
+    if (/\b(root cause|because|blocker|violates?|contradicts?)\b/.test(around)) {
+      score += 20;
+    }
+    return score;
+  };
+
+  const symbolTasksForBlocker = (blocker, tasksWithFiles) => {
+    const text = String(blocker || "");
+    const matches = [];
+    for (const task of tasksWithFiles) {
+      for (const symbol of taskSymbols(task)) {
+        const pattern = new RegExp(`\\b${escapeRegExp(symbol)}\\b`, "g");
+        let match = null;
+        while ((match = pattern.exec(text))) {
+          matches.push({
+            task,
+            index: match.index,
+            score: symbolMatchScore(text, symbol, match.index),
+          });
+        }
+      }
+    }
+    if (matches.length === 0) {
+      return [];
+    }
+    const bestScore = Math.max(...matches.map((match) => match.score));
+    return uniqueTasks(
+      matches
+        .filter((match) => match.score === bestScore)
+        .map((match) => match.task)
+    );
   };
 
   const primaryTasksForBlocker = (blocker, tasksWithFiles) => {
@@ -611,6 +709,11 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
           searchFrom = index + file.length;
         }
       }
+    }
+    const symbolMatches = symbolTasksForBlocker(blocker, tasksWithFiles);
+    if (symbolMatches.length > 0) {
+      const positiveFileMatches = matches.filter((match) => match.score > 0);
+      return uniqueTasks([...positiveFileMatches.map((match) => match.task), ...symbolMatches]);
     }
     if (matches.length === 0) {
       return [];
@@ -655,9 +758,6 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
     );
     return fallbackMatched.length > 0 ? fallbackMatched : TASKS;
   };
-
-  const candidateTouchesTask = (candidate, task) =>
-    taskFiles(task).some((file) => candidate?.worktree?.files?.includes(file));
 
   const candidateFiles = (items) =>
     [...new Set((items || []).flatMap((candidate) => candidate?.worktree?.files || []))];

@@ -1,6 +1,6 @@
 [package]
 name = "pandacode"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "PandaCode: one CLI shape to run coding tasks across codex, claude, and domestic-LLM (bamboo) runtimes."
 license = "MIT"

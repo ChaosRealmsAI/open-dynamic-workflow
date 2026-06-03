@@ -2237,10 +2237,26 @@ async function main() {
   saveState();
   emit({ type: "workflow_start", name, script: scriptPath, backend, resumeFrom, whenToUse });
   const result = await workflow(workflowInput);
-  state.result = result;
+  // A workflow that returns a non-JSON-serializable value (circular reference,
+  // BigInt, function) would otherwise crash the runner inside saveState()/emit()
+  // with an opaque stringify TypeError surfaced only as "exited with status 1".
+  // Turn it into a clean, structured failure the caller can read.
+  let safeResult = result;
+  try {
+    JSON.stringify(result);
+  } catch (error) {
+    safeResult = {
+      ok: false,
+      error: {
+        category: "result_not_serializable",
+        message: `workflow "${name}" returned a non-JSON-serializable value: ${String(error?.message ?? error)}`
+      }
+    };
+  }
+  state.result = safeResult;
   state.completedAt = new Date().toISOString();
   saveState();
-  emit({ type: "workflow_done", name, result });
+  emit({ type: "workflow_done", name, result: safeResult });
 }
 
 function prepareWorkflowModule(path, workflowInput) {

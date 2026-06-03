@@ -435,6 +435,21 @@ return { answer: 42, tag: "selftest-result" };`);
   assert(/\[result\] \{.*"answer":42.*"tag":"selftest-result".*\}/.test(r.out), `no [result] line: ${r.out.slice(-200)}`);
 });
 
+test("result: a non-serializable return is a clean failure, not an opaque crash", () => {
+  // A circular return would crash JSON.stringify inside the runner; instead of an
+  // opaque "exited with status 1", it must surface a structured failure.
+  const r = run(`export const meta={name:"ns"};
+phase("P","");
+const o = { a: 1 }; o.self = o;
+return o;`);
+  assert(r.code !== 0, `non-serializable return must fail non-zero, got ${r.code}`);
+  const done = ev(r.events, "workflow_done");
+  assert(
+    done.length === 1 && done[0].result?.error?.category === "result_not_serializable",
+    `expected result_not_serializable, got ${JSON.stringify(done[0]?.result)}`
+  );
+});
+
 test("exec: --json prints only the result object (no progress lines)", () => {
   const r = run(`export const meta={name:"rj"};
 phase("P","");

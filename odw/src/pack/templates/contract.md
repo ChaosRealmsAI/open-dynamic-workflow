@@ -14,7 +14,7 @@ odw starter parallel-review-apply > wf.js
 
 That starter fans out isolated Codex worktrees, reviews the combined candidate
 in a temporary worktree, repairs reviewer-rejected batches up to
-`args.maxReviewRounds` (default 2), targets blocker-matched task files when
+`args.maxReviewRounds` (default 2 for small batches and 3 for 3+ tasks), targets blocker-matched task files when
 possible, lands only `approve` gates atomically, and then verifies the main
 working directory under a read-only snapshot guard. If final verification
 modifies files after approval, the run restores those unapproved changes and

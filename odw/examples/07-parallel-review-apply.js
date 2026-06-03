@@ -47,7 +47,8 @@ export default async function workflow() {
 
   const TASKS = Array.isArray(args?.tasks) && args.tasks.length ? args.tasks : DEFAULT_TASKS;
   const TEST = args?.test || "echo 'no test command configured'";
-  const maxReviewRounds = Math.max(1, Math.min(4, Number(args?.maxReviewRounds || 2)));
+  const defaultReviewRounds = TASKS.length >= 3 ? 3 : 2;
+  const maxReviewRounds = Math.max(1, Math.min(4, Number(args?.maxReviewRounds || defaultReviewRounds)));
   const strictTaskFileBoundaries = args?.strictTaskFileBoundaries !== false;
   const allowDirtyTaskFiles = args?.allowDirtyTaskFiles === true;
   const taskBrief = TASKS.map(
@@ -72,7 +73,10 @@ ${taskBrief}`;
 
   const implementationPrompt = (task, repairFeedback) => `${task.prompt}
 
-${repairFeedback ? `Review feedback to address before returning:\n${repairFeedback}\n` : ""}
+${repairFeedback ? `Review feedback to address before returning:\n${repairFeedback}
+
+When feedback references files owned by other tasks, treat those references as evidence only. Repair only this task's declared file list and preserve the original task intent.
+` : ""}
 Constraints:
 - Only edit the files needed for this task${taskFiles(task).length ? `: ${taskFiles(task).join(", ")}` : ""}.
 - Keep the change independently reviewable.
@@ -240,17 +244,61 @@ Reviewer evidence:
 ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
   };
 
+  const reviewBlockers = (gate) => [
+    ...(gate?.blockers || []),
+    ...(gate?.reviews || []).flatMap((review) => review.blockers || []),
+  ].filter(Boolean);
+
+  const uniqueTasks = (items) => {
+    const seen = new Map();
+    for (const task of items || []) {
+      if (task?.id && !seen.has(task.id)) {
+        seen.set(task.id, task);
+      }
+    }
+    return [...seen.values()];
+  };
+
+  const primaryTasksForBlocker = (blocker, tasksWithFiles) => {
+    const text = String(blocker || "");
+    let bestIndex = Infinity;
+    const matched = [];
+    for (const task of tasksWithFiles) {
+      for (const file of taskFiles(task)) {
+        const index = text.indexOf(file);
+        if (index < 0) {
+          continue;
+        }
+        if (index < bestIndex) {
+          bestIndex = index;
+          matched.length = 0;
+        }
+        if (index === bestIndex) {
+          matched.push(task);
+        }
+      }
+    }
+    return uniqueTasks(matched);
+  };
+
   const tasksForReviewRepair = (gate) => {
-    const blockerText = [
-      ...(gate?.blockers || []),
-      ...(gate?.reviews || []).flatMap((review) => review.blockers || []),
-    ].join("\n");
-    const tasksWithFiles = TASKS.filter((task) => task.file);
-    if (!blockerText || tasksWithFiles.length === 0) {
+    const blockers = reviewBlockers(gate);
+    const tasksWithFiles = TASKS.filter((task) => taskFiles(task).length > 0);
+    if (blockers.length === 0 || tasksWithFiles.length === 0) {
       return TASKS;
     }
-    const matched = tasksWithFiles.filter((task) => blockerText.includes(task.file));
-    return matched.length > 0 ? matched : TASKS;
+    const primaryMatched = uniqueTasks(
+      blockers.flatMap((blocker) => primaryTasksForBlocker(blocker, tasksWithFiles))
+    );
+    if (primaryMatched.length > 0) {
+      return primaryMatched;
+    }
+    const fallbackMatched = uniqueTasks(
+      tasksWithFiles.filter((task) =>
+        blockers.some((blocker) => taskFiles(task).some((file) => String(blocker).includes(file)))
+      )
+    );
+    return fallbackMatched.length > 0 ? fallbackMatched : TASKS;
   };
 
   const candidateTouchesTask = (candidate, task) =>

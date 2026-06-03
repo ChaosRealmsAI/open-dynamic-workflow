@@ -150,7 +150,8 @@ odw exec --script wf.js --backend pandacode --json
 
 - `parallel-review-apply` is the default large-project shape: independent Codex
   worktrees, a candidate-worktree review gate, bounded repair/re-review
-  (`args.maxReviewRounds`, default 2), approve-only atomic landing, then final
+  (`args.maxReviewRounds`, default 2 for small batches and 3 for 3+ tasks),
+  approve-only atomic landing, then final
   verification. Repair targets blocker-matched task files when possible and
   falls back to full-batch repair when blockers are ambiguous. It stops instead
   of landing on `needs_owner`. Final verification is guarded by a main-worktree

@@ -1252,6 +1252,42 @@ test("examples: parallel-review-apply repairs only blocker-matched tasks before 
   }
 });
 
+test("examples: parallel-review-apply treats secondary file mentions as repair evidence", () => {
+  const { dir } = makeGitRepo("odw-example-07-repair-primary-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('primary repair verify ok')\"",
+      maxReviewRounds: 2,
+      tasks: [
+        { id: "code", file: "src/api.js", prompt: "Create src/api.js." },
+        { id: "tests", file: "test.mjs", prompt: "Create test.mjs." },
+        { id: "docs", file: "docs/api.md", prompt: "Create docs/api.md." }
+      ],
+      reviewers: [
+        {
+          label: "contract-review",
+          runtime: "codex",
+          perspective: "MOCK_REJECT_ONCE_BLOCKER:docs/api.md documents itemCount, but src/api.js and test.mjs expose count."
+        }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `example 07 primary repair run failed: ${r.out.slice(-900)}`);
+    assert(/repairing tasks=docs/.test(r.out), `repair did not target primary blocker file only: ${r.out.slice(-900)}`);
+    const result = r.state.result;
+    const repairPlan = result.history.find((item) => item.step === "repair_plan" && item.round === 2);
+    assert(repairPlan?.tasks?.join("|") === "docs", `wrong repair tasks: ${JSON.stringify(repairPlan)}`);
+    assert(repairPlan.retained_files?.includes("src/api.js"), `code candidate was not retained: ${JSON.stringify(repairPlan)}`);
+    assert(repairPlan.retained_files?.includes("test.mjs"), `test candidate was not retained: ${JSON.stringify(repairPlan)}`);
+    assert(/mock change by impl:code/.test(readFileSync(join(dir, "src/api.js"), "utf8")), "code task should retain initial candidate");
+    assert(/mock change by impl:tests/.test(readFileSync(join(dir, "test.mjs"), "utf8")), "tests task should retain initial candidate");
+    assert(/mock change by repair:docs/.test(readFileSync(join(dir, "docs/api.md"), "utf8")), "docs task should land repair candidate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply blocks failed or cross-owned implementation before review", () => {
   const { dir } = makeGitRepo("odw-example-07-pre-review-block-");
   try {

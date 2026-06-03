@@ -33,7 +33,7 @@ the agent must read should be committed first (the worktree branches from HEAD).
 Example 07 intentionally lands approved changes into `cwd`; run it from the
 target project or a disposable git repo. It treats caller-supplied context and
 task prompts as owner intent, repairs blocker-matched tasks up to
-`args.maxReviewRounds` (default 2), falls back to full-batch repair when blockers
+`args.maxReviewRounds` (default 2 for small batches and 3 for 3+ tasks), falls back to full-batch repair when blockers
 cannot be mapped to task files, stops for `needs_owner`, and treats final
 verification as read-only: any post-approval file mutation fails the run and is
 restored from the pre-verification snapshot.

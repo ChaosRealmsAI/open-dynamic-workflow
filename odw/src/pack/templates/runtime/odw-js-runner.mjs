@@ -2144,10 +2144,11 @@ function mockResultForSchema(options, prompt) {
       mockReviewRejectOnce.set(key, seen + 1);
       if (seen === 0) {
         const file = text.match(/MOCK_REJECT_ONCE_FILE:([^\s]+)/)?.[1];
+        const blocker = text.match(/MOCK_REJECT_ONCE_BLOCKER:([^\n]+)/)?.[1]?.trim();
         return {
           decision: "reject",
           summary: "mock review rejected the first attempt",
-          blockers: [file ? `mock one-time blocker in ${file}` : "mock one-time blocker"],
+          blockers: [blocker || (file ? `mock one-time blocker in ${file}` : "mock one-time blocker")],
           risks: [],
           owner_questions: [],
           verification: ["mock preflight passed"],

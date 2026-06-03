@@ -2450,7 +2450,7 @@ fn framework_spec_json() -> serde_json::Value {
             }
         },
         "lifecycle": {
-            "run": "odw exec --script <workflow.js> --input <json> --backend <mock|pandacode>; optional /odw, /odw-audit, /odw-ship, /odw-flow, or odw run for Claude Code",
+            "run": "odw exec --script <workflow.js> --input <json> --backend <mock|pandacode>; optional /odw, /odw-audit, /odw-ship, /odw-flow for Claude Code",
             "watch": "odw runs show <run_id|latest>",
             "observe": "odw exec live stream + odw runs list/show journals",
             "pause_resume": "odw exec --resume <run_id|latest>; optional /workflows then p for Claude Code",

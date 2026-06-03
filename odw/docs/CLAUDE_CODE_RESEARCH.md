@@ -78,7 +78,7 @@ The correct product boundary is:
 
 - ODW owns direct workflow execution, live logs, run journals, and direct-run
   resume for `odw exec`.
-- Open Dynamic Workflow installs workflow starter scripts, schemas, and CLI/MCP
+- Open Dynamic Workflow installs workflow starter scripts, schemas, and CLI
   management tools.
 - ODW does not own live Claude Code `/workflows` state.
 - Real executor work goes through PandaCode. Codex-backed workflow nodes use

@@ -70,7 +70,6 @@ That means the first-class surface is:
 - `.odw/schemas` for worker output contracts
 - `.odw/bin/odw` for project-local worker access to the ODW CLI
 - `.odw/schemas/error-feedback.schema.json` for retry/blocker feedback
-- optional `odw mcp` for hosts that prefer tool calls
 
 ## Interface Coverage
 
@@ -95,7 +94,6 @@ Open Dynamic Workflow maps the requested workflow controls as follows:
 | schema retry | `agent(..., { schema, schemaDescription, retry: { maxAttempts } })` is opt-in; it validates only the final assistant response, injects mismatch context into the same node prompt, and retries |
 | error feedback | `odw-failure-analyst` + `.odw/schemas/error-feedback.schema.json` |
 | pack install/validate | `odw init`, `odw validate` |
-| MCP tool surface | optional `odw mcp` |
 
 ## PandaCode Executor
 

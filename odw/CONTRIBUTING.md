@@ -16,7 +16,7 @@ CI (`.github/workflows/ci.yml`) runs exactly this on every push / PR.
 
 ## Layout
 
-- `src/main.rs` — the `odw` CLI (commands, MCP server, run journal, capabilities).
+- `src/main.rs` — the `odw` CLI (commands, run journal, capabilities).
 - `src/pack/` — the project pack `odw init` installs; templates under
   `src/pack/templates/`.
 - `src/pack/templates/runtime/odw-js-runner.mjs` — the embedded workflow runtime

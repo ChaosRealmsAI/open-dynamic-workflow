@@ -347,6 +347,20 @@ return {ok:true};`);
   assert(/SM ok=false cat=schema_mismatch issues=[1-9]/.test(r.out), `final schema_mismatch result wrong: ${r.out.slice(-300)}`);
 });
 
+test("schema: an unloadable schema fails fast and non-retryably", () => {
+  // A typo'd/missing schema path is a config error, not a transient mismatch:
+  // it must fail with a clear category and NOT burn retries (the file won't
+  // appear on retry). Distinct from schema_mismatch, which is retryable.
+  const r = run(`export const meta={name:"sle"};
+phase("P","");
+const out = await agent("x",{ label:"sle", retry:{maxAttempts:3}, schema:"does-not-exist-schema.json" });
+log("SLE ok="+(out?.ok)+" cat="+(out?.error?.category)+" retryable="+(out?.error?.retryable));
+return {ok:true};`);
+  assert(r.code === 0, `run failed: ${r.out.slice(-300)}`);
+  assert(/SLE ok=false cat=schema_load_error retryable=false/.test(r.out), `unloadable schema result wrong: ${r.out.slice(-300)}`);
+  assert(ev(r.events, "agent_retry").length === 0, `unloadable schema must not retry, saw ${ev(r.events, "agent_retry").length}`);
+});
+
 // 7. Key error/edge semantics (must match built-in) ------------------------
 test("parallel: a thrown thunk -> null, batch never rejects", () => {
   const r = run(`export const meta={name:"pt"};

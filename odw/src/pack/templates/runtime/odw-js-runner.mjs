@@ -162,6 +162,23 @@ globalThis.agent = async (prompt, options = {}) => {
   const schema = loadSchemaDescriptor(options.schema);
   const schemaDescription = resolveSchemaDescription(normalizedOptions, schema);
   const maxAttempts = Math.max(1, Number(options.retry?.maxAttempts || options.maxAttempts || 1));
+  // An unloadable schema (typo'd path, or a non-object/non-string value) is a
+  // workflow config error, not a transient mismatch. Fail fast and NON-retryably
+  // with a clear message instead of wasting `maxAttempts` re-running the node and
+  // returning a confusing schema_mismatch envelope (the file won't appear on retry).
+  if (schema && schema.error) {
+    const result = {
+      ok: false,
+      error: {
+        category: "schema_load_error",
+        message: `agent node "${label}" schema "${schema.name}" could not be loaded: ${schema.error}`,
+        retryable: false
+      }
+    };
+    markAgentFailed({ key, label, phase, agentType, attempt: 1, maxAttempts, result });
+    emit({ type: "agent_done", index: agentIndex, key, label, phase, agentType, attempt: 1, maxAttempts, ok: false, result });
+    return result;
+  }
   const cached = state.agents[key];
   if (
     cached?.ok !== false

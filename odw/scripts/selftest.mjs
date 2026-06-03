@@ -1535,6 +1535,32 @@ test("examples: parallel-review-apply blocks undeclared task file ownership befo
   }
 });
 
+test("examples: parallel-review-apply blocks empty or non-string task prompts before worktrees", () => {
+  const { dir } = makeGitRepo("odw-example-07-invalid-prompts-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('invalid prompt guard')\"",
+      tasks: [
+        { id: "empty", file: "docs/empty.md", prompt: "   " },
+        { id: "object", file: "docs/object.md", prompt: { text: "Create docs/object.md." } }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code !== 0, "starter should fail before worktrees when task prompts are invalid");
+    const result = r.state.result;
+    assert(result?.error?.category === "invalid_task_prompts", `wrong invalid-prompt error: ${JSON.stringify(result?.error)}`);
+    const prompts = Object.fromEntries((result?.invalidTaskPrompts || []).map((item) => [item.id, item.type]));
+    assert(prompts.empty === "string", `empty string prompt not reported: ${JSON.stringify(result)}`);
+    assert(prompts.object === "object", `object prompt not reported: ${JSON.stringify(result)}`);
+    assert(ev(r.events, "worktree_start").length === 0, "invalid prompt guard should not create implementation worktrees");
+    assert(ev(r.events, "worktree_review_gate").length === 0, "invalid prompt guard should not run review gate");
+    assert(ev(r.events, "worktree_patch_apply").length === 0, "invalid prompt guard should not apply patches");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply fails if final verification mutates cwd", () => {
   const { dir } = makeGitRepo("odw-example-07-verify-guard-");
   try {
@@ -1572,6 +1598,7 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
   assert(/pre_review_block/.test(starter.out) && /strictTaskFileBoundaries/.test(starter.out), "starter output missing pre-review implementation gate");
   assert(/invalid_task_ids/.test(starter.out) && /stable unique id/.test(starter.out), "starter output missing task id guard");
   assert(/invalid_task_files/.test(starter.out) && /repo-relative paths/.test(starter.out), "starter output missing invalid task-file path guard");
+  assert(/invalid_task_prompts/.test(starter.out) && /non-empty prompt/.test(starter.out), "starter output missing task prompt guard");
   assert(/undeclared_task_files/.test(starter.out) && /allowUndeclaredTaskFiles/.test(starter.out), "starter output missing undeclared task-file guard");
   assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
   assert(/duplicate_task_files/.test(starter.out) && /allowDuplicateTaskFiles/.test(starter.out), "starter output missing duplicate task-file guard");

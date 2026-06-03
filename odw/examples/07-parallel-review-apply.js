@@ -171,6 +171,35 @@ export default async function workflow() {
     };
   }
 
+  const invalidTaskPrompts = TASKS
+    .map((task, index) => ({
+      index,
+      id: task.id,
+      files: taskFiles(task),
+      type: typeof task?.prompt,
+      prompt: task?.prompt,
+    }))
+    .filter((entry) => typeof entry.prompt !== "string" || entry.prompt.trim().length === 0)
+    .map((entry) => ({
+      index: entry.index,
+      id: entry.id,
+      files: entry.files,
+      type: entry.type,
+    }));
+  if (invalidTaskPrompts.length > 0) {
+    return {
+      ok: false,
+      error: {
+        category: "invalid_task_prompts",
+        message:
+          "Every parallel task must declare a non-empty prompt before worktrees can be created.",
+      },
+      invalidTaskPrompts,
+      hint:
+        "Write a concrete task prompt for each task. Empty or non-string prompts make implementation nodes ambiguous and unsafe.",
+    };
+  }
+
   const taskBrief = TASKS.map(
     (task) => `- ${task.id}: ${taskFiles(task).join(", ") || "(files from prompt)"} — ${task.prompt}`
   ).join("\n");

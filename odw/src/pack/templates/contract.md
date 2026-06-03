@@ -20,7 +20,9 @@ working directory under a read-only snapshot guard. If final verification
 modifies files after approval, the run restores those unapproved changes and
 fails instead of bypassing review.
 Each task must declare a stable unique `id`; ODW uses task ids for node keys,
-sessions, repair history, and reports.
+sessions, repair history, and reports. Each task must also declare a non-empty
+string `prompt`; empty or non-string prompts are rejected before worktrees are
+created.
 Before review, it blocks failed implementation nodes and cross-owned file edits.
 Use `task.file` or `task.files` to declare each task's ownership. Use a separate
 planning step for exploratory work, or set `allowUndeclaredTaskFiles:true` only

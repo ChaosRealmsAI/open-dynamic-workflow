@@ -562,26 +562,78 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
     return [...seen.values()];
   };
 
+  const isTestFile = (file) => {
+    const name = String(file || "").split("/").pop() || "";
+    return /(^test\b|\.test\.|\.spec\.|test-|tests?)/i.test(name);
+  };
+
+  const blockerMatchScore = (text, file, index) => {
+    const start = Math.max(0, index - 100);
+    const end = Math.min(text.length, index + file.length + 220);
+    const around = text.slice(start, end).toLowerCase();
+    const after = text.slice(index + file.length, end).toLowerCase();
+    let score = 0;
+    const rootCausePhrases =
+      /\b(does not|doesn't|fails to|returns?|drops?|loses?|preserv(?:e|es)|infers?|violates?|contradicts?|documents?|exposes?|missing|required|should|must|cannot|can't|wrong)\b/;
+    if (rootCausePhrases.test(after)) {
+      score += 100;
+    }
+    if (/\b(root cause|because|blocker|violates?|contradicts?)\b/.test(around)) {
+      score += 20;
+    }
+    if (
+      isTestFile(file) &&
+      /\b(node\s+\S*test|tests?\s+fail|fails?\s+at|exits?\s+with\s+code|assertionerror|expected\b.*\bactual|actual\b.*\bexpected)\b/.test(
+        around
+      )
+    ) {
+      score -= 70;
+    }
+    return score;
+  };
+
   const primaryTasksForBlocker = (blocker, tasksWithFiles) => {
     const text = String(blocker || "");
-    let bestIndex = Infinity;
-    const matched = [];
+    const matches = [];
     for (const task of tasksWithFiles) {
       for (const file of taskFiles(task)) {
-        const index = text.indexOf(file);
-        if (index < 0) {
-          continue;
-        }
-        if (index < bestIndex) {
-          bestIndex = index;
-          matched.length = 0;
-        }
-        if (index === bestIndex) {
-          matched.push(task);
+        let searchFrom = 0;
+        while (searchFrom < text.length) {
+          const index = text.indexOf(file, searchFrom);
+          if (index < 0) {
+            break;
+          }
+          matches.push({
+            task,
+            index,
+            score: blockerMatchScore(text, file, index),
+          });
+          searchFrom = index + file.length;
         }
       }
     }
-    return uniqueTasks(matched);
+    if (matches.length === 0) {
+      return [];
+    }
+    const bestScore = Math.max(...matches.map((match) => match.score));
+    if (bestScore > 0) {
+      const bestIndex = Math.min(
+        ...matches
+          .filter((match) => match.score === bestScore)
+          .map((match) => match.index)
+      );
+      return uniqueTasks(
+        matches
+          .filter((match) => match.score === bestScore && match.index === bestIndex)
+          .map((match) => match.task)
+      );
+    }
+    const earliestIndex = Math.min(...matches.map((match) => match.index));
+    return uniqueTasks(
+      matches
+        .filter((match) => match.index === earliestIndex)
+        .map((match) => match.task)
+    );
   };
 
   const tasksForReviewRepair = (gate) => {

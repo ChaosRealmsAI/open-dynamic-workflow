@@ -1353,6 +1353,53 @@ test("examples: parallel-review-apply treats secondary file mentions as repair e
   }
 });
 
+test("examples: parallel-review-apply repairs root-cause file when blocker starts with test failure", () => {
+  const { dir } = makeGitRepo("odw-example-07-repair-root-cause-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('root cause repair verify ok')\"",
+      maxReviewRounds: 2,
+      tasks: [
+        {
+          id: "annotations",
+          file: "src/annotations.js",
+          prompt: "Create src/annotations.js."
+        },
+        { id: "tests", file: "test.mjs", prompt: "Create test.mjs." }
+      ],
+      reviewers: [
+        {
+          label: "root-cause-review",
+          runtime: "codex",
+          perspective:
+            "MOCK_REJECT_ONCE_BLOCKER:`node test.mjs` exits with code 1 at `test.mjs:80`: src/annotations.js does not infer sourceType from colon-delimited source strings."
+        }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `example 07 root-cause repair run failed: ${r.out.slice(-900)}`);
+    assert(
+      /repairing tasks=annotations/.test(r.out),
+      `repair did not target implementation root cause: ${r.out.slice(-900)}`
+    );
+    const result = r.state.result;
+    const repairPlan = result.history.find((item) => item.step === "repair_plan" && item.round === 2);
+    assert(repairPlan?.tasks?.join("|") === "annotations", `wrong repair tasks: ${JSON.stringify(repairPlan)}`);
+    assert(
+      repairPlan.retained_files?.includes("test.mjs"),
+      `test candidate was not retained: ${JSON.stringify(repairPlan)}`
+    );
+    assert(
+      /mock change by repair:annotations/.test(readFileSync(join(dir, "src/annotations.js"), "utf8")),
+      "implementation task should land repair candidate"
+    );
+    assert(/mock change by impl:tests/.test(readFileSync(join(dir, "test.mjs"), "utf8")), "test task should retain initial candidate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply defaults to three review rounds for 3+ tasks", () => {
   const { dir } = makeGitRepo("odw-example-07-default-rounds-");
   try {

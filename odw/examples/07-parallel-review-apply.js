@@ -640,12 +640,9 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
   const candidateForTask = (task) =>
     (candidates || []).find((candidate) => candidateTouchesTask(candidate, task));
 
-  const taskSymbols = (task) => {
+  const taskDefinedSymbols = (task) => {
     const candidate = candidateForTask(task);
-    return [...new Set([
-      ...extractDefinedSymbols(candidate?.worktree?.diff || ""),
-      ...extractPromptOwnedSymbols(task),
-    ])];
+    return extractDefinedSymbols(candidate?.worktree?.diff || "");
   };
 
   const symbolMatchScore = (text, symbol, index) => {
@@ -663,11 +660,10 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
     return score;
   };
 
-  const symbolTasksForBlocker = (blocker, tasksWithFiles) => {
-    const text = String(blocker || "");
+  const symbolMatchesForBlocker = (text, tasksWithFiles, symbolsForTask) => {
     const matches = [];
     for (const task of tasksWithFiles) {
-      for (const symbol of taskSymbols(task)) {
+      for (const symbol of symbolsForTask(task)) {
         const pattern = new RegExp(`\\b${escapeRegExp(symbol)}\\b`, "g");
         let match = null;
         while ((match = pattern.exec(text))) {
@@ -678,6 +674,15 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
           });
         }
       }
+    }
+    return matches;
+  };
+
+  const symbolTasksForBlocker = (blocker, tasksWithFiles) => {
+    const text = String(blocker || "");
+    const matches = symbolMatchesForBlocker(text, tasksWithFiles, taskDefinedSymbols);
+    if (matches.length === 0) {
+      matches.push(...symbolMatchesForBlocker(text, tasksWithFiles, extractPromptOwnedSymbols));
     }
     if (matches.length === 0) {
       return [];

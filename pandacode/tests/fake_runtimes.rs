@@ -115,6 +115,7 @@ if [[ "${1:-}" == "session" ]]; then
   case "$action" in
     start)
       printf '{"run_id":"run_needs_input","thread_id":"thread_fake","thread_path":"/tmp/thread.jsonl","status":"needs_input","current_phase":"needs_input","last_agent_message":"Need a decision","questions":[{"question":"How should this continue?"}]}\n'
+      exit 20
       ;;
     read)
       printf '{"run_id":"run_needs_input","status":"needs_input","current_phase":"needs_input","last_agent_message":"Need a decision","questions":[]}\n'

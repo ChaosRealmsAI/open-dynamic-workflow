@@ -106,7 +106,7 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
         &output,
         raw.as_ref(),
     );
-    let (ok, state, final_summary, execute_report) = if output.ok {
+    let (ok, state, final_summary, execute_report) = if output.ok || is_needs_input(raw.as_ref()) {
         if let Some(run_id) = record.run_id.as_deref() {
             if is_needs_input(raw.as_ref()) {
                 set_pending_input(&mut record, Some("start"), raw.as_ref());
@@ -285,7 +285,7 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         &output,
         raw.as_ref(),
     );
-    let (ok, state, final_summary, execute_report) = if output.ok {
+    let (ok, state, final_summary, execute_report) = if output.ok || is_needs_input(raw.as_ref()) {
         if is_needs_input(raw.as_ref()) {
             set_pending_input(&mut record, Some("send"), raw.as_ref());
             (

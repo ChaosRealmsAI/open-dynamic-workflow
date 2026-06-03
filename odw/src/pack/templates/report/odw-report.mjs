@@ -43,6 +43,8 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family
 .kv .v{color:var(--ink);font-family:ui-monospace,Menlo,monospace;font-size:12.5px;word-break:break-word}
 .kv .v.ok{color:var(--ok)}.kv .v.fail{color:var(--fail)}
 .prompt{background:#0a0b0f;border:1px solid var(--line);border-radius:10px;padding:14px 15px;font-size:12.5px;line-height:1.7;color:var(--ink2);white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;max-height:46vh;overflow:auto}
+.history{margin:0;padding:0;list-style:none;display:grid;gap:8px}
+.history li{border:1px solid var(--line);border-radius:8px;background:#0b0d13;padding:9px 11px;color:var(--ink2);font-size:12.5px;line-height:1.45}
 .empty{color:var(--dim);font-size:13px}
 </style></head><body>
 <div class="top"><span class="ttl">__TITLE__</span><span class="sub">__SUBTITLE__</span></div>
@@ -103,6 +105,9 @@ function showOverview(){
  if(o.modelTokens&&o.modelTokens.length){
    h+='<div class="lab" style="margin-top:22px">tokens by model</div><div class="kv">'+
      o.modelTokens.map(([m,t])=>row(m,num(t))).join('')+'</div>';}
+ if(o.history&&o.history.length){
+   h+='<div class="lab" style="margin-top:22px">workflow history</div><ol class="history">'+
+     o.history.map((line)=>'<li>'+esc(line)+'</li>').join('')+'</ol>';}
  h+='<div class="lab" style="margin-top:22px">tip</div><div class="empty">Click any agent, review gate, workspace, or apply node to inspect the exact runtime evidence.</div>';
  document.getElementById('detail').innerHTML=h;}
 function fitGraph(){const svg=document.querySelector('.graph svg'),g=document.querySelector('.graph');
@@ -279,7 +284,53 @@ if (totalTokens > attributed) modelTokens.push(["other (retries/overhead)", tota
 const eventNodes = order.map((id) => nodes[id]).filter((n) => n.kind === "event");
 const reviewGateCount = eventNodes.filter((n) => n.eventType === "worktree_review_gate").length;
 const applyEventCount = eventNodes.filter((n) => n.eventType === "worktree_patch_apply").length;
-const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: Boolean(wfErr) || aiNodes.some((n) => n.status === "failed") || eventNodes.some((n) => n.ok === false), ai: aiNodes.length, gates: reviewGateCount, applies: applyEventCount, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx), modelTokens };
+const workflowHistory = Array.isArray(state.result?.history)
+  ? state.result.history.map(formatHistoryItem).filter(Boolean).slice(0, 12)
+  : [];
+const workflowFailed = Boolean(wfErr)
+  || Boolean(wfDone && wfDone.result && wfDone.result.ok === false)
+  || Boolean(!wfDone && (aiNodes.some((n) => n.status === "failed") || eventNodes.some((n) => n.ok === false)));
+const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: workflowFailed, ai: aiNodes.length, gates: reviewGateCount, applies: applyEventCount, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx), modelTokens, history: workflowHistory };
+
+function truncateText(value, max) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, Math.max(0, max - 1)) + "…" : text;
+}
+function historyTasks(item) {
+  const tasks = Array.isArray(item?.tasks) ? item.tasks : [];
+  return tasks.map((task) => typeof task === "string" ? task : task?.id).filter(Boolean);
+}
+function historyArrayLen(item, key) {
+  return Array.isArray(item?.[key]) ? item[key].length : 0;
+}
+function formatHistoryItem(item) {
+  const step = item?.step;
+  const round = item?.round || 1;
+  const tasks = historyTasks(item);
+  const files = historyArrayLen(item, "files");
+  const blockers = historyArrayLen(item, "blockers");
+  if (step === "plan") {
+    const summary = item.summary ? ` — ${truncateText(item.summary, 120)}` : "";
+    return `plan: ${tasks.length} task(s) ${truncateText(tasks.join(","), 120)}${summary}`;
+  }
+  if (step === "implement") return `implement r${round}: ${tasks.length} task(s), ${files} file(s)`;
+  if (step === "pre_review_block") {
+    return `pre-review block r${round}: failed=${historyArrayLen(item, "failed_tasks")} scope_issues=${historyArrayLen(item, "scope_issues")}`;
+  }
+  if (step === "review") {
+    return `review r${round}: ${item.decision || "unknown"} applyReady=${Boolean(item.applyReady)} blockers=${blockers} files=${files}`;
+  }
+  if (step === "repair_plan") {
+    return `repair plan r${round}: tasks=${truncateText(tasks.join(","), 120)} retained_files=${historyArrayLen(item, "retained_files")}`;
+  }
+  if (step === "repair") {
+    return `repair r${round}: tasks=${truncateText(tasks.join(","), 120)} files=${files} candidate_files=${historyArrayLen(item, "candidate_files")}`;
+  }
+  if (step === "verify") {
+    return `verify: ok=${Boolean(item.ok)} guard=${Boolean(item.guard?.ok)}`;
+  }
+  return step ? `${step}${item.round ? ` r${item.round}` : ""}` : null;
+}
 
 // ---- mermaid (uncoloured) -------------------------------------------------
 const safe = (id) => "n_" + String(id).replace(/[^a-zA-Z0-9_]/g, "_");

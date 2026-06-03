@@ -1175,7 +1175,11 @@ test("report: odw report --run renders an HTML execution graph", () => {
   const r = run(`export const meta={name:"rp"};
 phase("P","");
 await parallel([ () => agent("alpha task",{label:"a",runtime:"codex",model:"gpt-5-codex"}), () => agent("beta task",{label:"b",runtime:"claude"}) ]);
-return {ok:true};`);
+return {ok:true,history:[
+  {step:"plan",summary:"mock report history",tasks:[{id:"alpha"},{id:"beta"}]},
+  {step:"review",round:1,decision:"approve",applyReady:true,blockers:[],files:["alpha.md","beta.md"]},
+  {step:"verify",ok:true,guard:{ok:true}}
+]};`);
   assert(r.code === 0 && r.runId, `run failed: ${r.out.slice(-200)}`);
   const rep = spawnSync(ODW, ["report", "--path", REPO, "--run", r.runId], { cwd: REPO, encoding: "utf8" });
   assert((rep.status ?? 1) === 0, `report failed: ${((rep.stdout || "") + (rep.stderr || "")).slice(-300)}`);
@@ -1185,6 +1189,9 @@ return {ok:true};`);
   assert(/"runtime":"codex"/.test(html) && /"runtime":"claude"/.test(html), "node runtimes missing in report");
   assert(/"model":"gpt-5-codex"/.test(html), "node model missing in report");
   assert(/config \(from code\)/.test(html) && /"prompt":"alpha task"/.test(html), "report missing config/prompt UI parsed from code");
+  assert(/workflow history/.test(html), "overview workflow history missing in report");
+  assert(/plan: 2 task\(s\) alpha,beta/.test(html), "plan history missing in report overview");
+  assert(/review r1: approve applyReady=true blockers=0 files=2/.test(html), "review history missing in report overview");
 });
 
 test("report: review gate and apply events are visible in the execution graph", () => {
@@ -1228,6 +1235,7 @@ return { ok: true, gate };`, { cwd: dir });
     assert(/gate: reject/.test(html), "reject gate node missing from report");
     assert(/blocker_samples/.test(html) && /mock blocker/.test(html), "reject gate blocker evidence missing from report");
     assert(/review_decisions/.test(html) && /review:reject/.test(html), "reject gate reviewer decision evidence missing from report");
+    assert(/"failed":false/.test(html), "a repaired/non-terminal reject gate should not mark the whole report failed");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -632,6 +632,15 @@ function normalizeNodeResult(result, options, schemaDescriptor = null) {
 function extractStructuredCodexOutput(report, schemaDescriptor = null) {
   const codex = report?.codex && typeof report.codex === "object" ? report.codex : null;
   const summary = report?.summary && typeof report.summary === "object" ? report.summary : null;
+  const validStructuredCandidate = (candidate) => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      return null;
+    }
+    if (schemaDescriptor?.schema && !validateNodeResult(candidate, schemaDescriptor).valid) {
+      return null;
+    }
+    return candidate;
+  };
   for (const candidate of [
     report?.structured_output,
     report?.structuredOutput,
@@ -649,11 +658,12 @@ function extractStructuredCodexOutput(report, schemaDescriptor = null) {
     codex?.output,
     codex?.json
   ]) {
-    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
-      return candidate;
+    const structured = validStructuredCandidate(candidate);
+    if (structured) {
+      return structured;
     }
   }
-  if (codex && !looksLikeCodexEnvelope(codex)) {
+  if (codex && !looksLikeCodexEnvelope(codex) && validStructuredCandidate(codex)) {
     return codex;
   }
   for (const message of report?.agent_messages ?? []) {
@@ -2610,6 +2620,15 @@ function normalizePandaCodeReport(report, context) {
   const runtime = report.runtime || context.runtime;
   const action = report.action || context.action;
   const rawReportPath = writePandaCodeRawReport(report, { runtime, action });
+  const rawSummary = report.summary && typeof report.summary === "object" && !Array.isArray(report.summary)
+    ? report.summary
+    : null;
+  const rawStart = report.start && typeof report.start === "object" && !Array.isArray(report.start)
+    ? report.start
+    : null;
+  const rawExecute = report.execute && typeof report.execute === "object" && !Array.isArray(report.execute)
+    ? report.execute
+    : null;
   const record = compactPandaRecord(report.record);
   const summary = compactPandaSummary(report.summary);
   const start = compactPandaCommand(report.start);
@@ -2619,14 +2638,17 @@ function normalizePandaCodeReport(report, context) {
   if (rawReportPath) {
     artifacts.raw_report = rawReportPath;
   }
-  const lastAgentMessage = truncateText(
+  const fullLastAgentMessage =
     readPandaCodeLastAssistantMessage(report)
-      || summary?.last_agent_message
-      || start?.last_agent_message
-      || execute?.last_agent_message
-      || "",
-    4000
-  );
+    || rawSummary?.last_agent_message
+    || rawSummary?.lastAgentMessage
+    || rawStart?.last_agent_message
+    || rawStart?.summary?.last_agent_message
+    || rawExecute?.last_agent_message
+    || rawExecute?.summary?.last_agent_message
+    || "";
+  const structuredOutput = parseJsonObjectFromText(fullLastAgentMessage);
+  const lastAgentMessage = truncateText(fullLastAgentMessage, 4000);
   const error = compactPandaError(report.error || start?.error || execute?.error);
   // A non-zero process exit means the executor failed, even when its JSON report
   // omits `ok` or optimistically reports ok:true. odw's core job is to surface
@@ -2647,6 +2669,7 @@ function normalizePandaCodeReport(report, context) {
     thread_id: report.thread_id || report.threadId || record?.thread_id || summary?.thread_id,
     thread_path: report.thread_path || report.threadPath || record?.thread_path || summary?.thread_path,
     last_agent_message: lastAgentMessage,
+    structured_output: structuredOutput || undefined,
     summary: compactPandaNodeSummary(summary, { start, execute }),
     ...domainFields,
     artifacts,

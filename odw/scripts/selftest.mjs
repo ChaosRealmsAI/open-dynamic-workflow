@@ -873,6 +873,26 @@ if (s === "jsonl_final_report") {
   }) + "\\n");
   process.exit(0);
 }
+if (s === "structured_summary_json") {
+  const plan = {
+    status: "planned",
+    summary: "x".repeat(4200),
+    tasks: [
+      {
+        id: "planned-task",
+        files: ["planned.txt"],
+        prompt: "Create planned.txt from the structured plan."
+      }
+    ]
+  };
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    state: "completed",
+    runtime: args[0] || "",
+    summary: { last_agent_message: JSON.stringify(plan) }
+  }) + "\\n");
+  process.exit(0);
+}
 if (s === "status_noise") {
   const { mkdirSync, writeFileSync } = await import("node:fs");
   const { spawnSync } = await import("node:child_process");
@@ -957,6 +977,30 @@ return { ok:true };`;
   assert(r.code === 0, `jsonl report run failed: ${r.out.slice(-300)}`);
   assert(/JSONL_RESULT=FINAL_JSONL_REPORT_MESSAGE/.test(r.out), `final report message not selected: ${r.out.slice(-500)}`);
   assert(!/JSONL_RESULT=EARLY_EVENT_MESSAGE/.test(r.out), `early event was selected as report: ${r.out.slice(-500)}`);
+});
+
+test("pandacode: schema nodes extract long structured final JSON before truncation", () => {
+  const wf = `export const meta={name:"longjson"};
+const plan = await agent("x", {
+  runtime:"codex",
+  label:"plan",
+  schema:{
+    title:"task-plan.schema.json",
+    type:"object",
+    required:["status","summary","tasks"],
+    properties:{
+      status:{enum:["planned"]},
+      summary:{type:"string"},
+      tasks:{type:"array",items:{type:"object",required:["id","prompt"],properties:{id:{type:"string"},files:{type:"array",items:{type:"string"}},prompt:{type:"string"}}}}
+    }
+  }
+});
+log("PLAN="+plan.status+":"+plan.tasks.length+":"+plan.summary.length);
+return { ok:true };`;
+  const r = run(wf, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "structured_summary_json" } });
+  assert(r.code === 0, `long structured JSON run failed: ${r.out.slice(-500)}`);
+  assert(/PLAN=planned:1:4200/.test(r.out), `structured JSON was not extracted before truncation: ${r.out.slice(-500)}`);
+  assert(ev(r.events, "agent_schema_invalid").length === 0, `unexpected schema mismatch: ${JSON.stringify(ev(r.events, "agent_schema_invalid"))}`);
 });
 
 test("pandacode: Bamboo provider dispatch argv and helper are passed through", () => {

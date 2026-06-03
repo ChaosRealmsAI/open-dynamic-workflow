@@ -125,6 +125,10 @@ Once the binary is installed and the requested backend is available on the
 machine, an agent can run coding tasks without preparing Claude settings, MCP
 files, hooks, or project configuration.
 
+Human-facing top-level inspection commands such as `pandacode doctor`,
+`pandacode models`, and `pandacode list` print compact summaries by default.
+Pass `--json` whenever a caller needs the full machine-readable report.
+
 Recommended agent loop:
 
 ```bash

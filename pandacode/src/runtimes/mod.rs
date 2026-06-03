@@ -5,7 +5,7 @@ pub mod codex;
 use std::{env, str::FromStr};
 
 use anyhow::{Result, anyhow};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     cli::{
@@ -278,7 +278,7 @@ pub async fn doctor(args: GlobalArgs) -> Result<()> {
     let codex = codex::doctor_report(&root, &args.bins)?;
     let claude = claude::doctor_report(&root, &args.bins)?;
     let bamboo = bamboo::doctor_report(&root, &args.bins).await?;
-    output_json(&json!({
+    let report = json!({
         "ok": codex.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
             || claude.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
             || bamboo.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -286,17 +286,29 @@ pub async fn doctor(args: GlobalArgs) -> Result<()> {
         "codex": codex,
         "claude": claude,
         "bamboo": bamboo
-    }))
+    });
+    if args.json {
+        output_json(&report)
+    } else {
+        println!("{}", format_doctor_summary(&report));
+        Ok(())
+    }
 }
 
 pub fn list_all(args: GlobalArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
-    output_json(&json!({
+    let report = json!({
         "ok": true,
         "codex": session::list(&root, "codex")?,
         "claude": session::list(&root, "claude")?,
         "bamboo": session::list(&root, "bamboo")?
-    }))
+    });
+    if args.json {
+        output_json(&report)
+    } else {
+        println!("{}", format_session_list_summary(&report));
+        Ok(())
+    }
 }
 
 pub async fn models_all(args: GlobalArgs) -> Result<()> {
@@ -304,12 +316,182 @@ pub async fn models_all(args: GlobalArgs) -> Result<()> {
     let codex = codex::models_report(&root, &args.bins)?;
     let claude = claude::models_report(&root, &args.bins)?;
     let bamboo = bamboo::models_report(&root, None).await?;
-    output_json(&json!({
+    let report = json!({
         "ok": true,
         "codex": codex,
         "claude": claude,
         "bamboo": bamboo
-    }))
+    });
+    if args.json {
+        output_json(&report)
+    } else {
+        println!("{}", format_models_summary(&report));
+        Ok(())
+    }
+}
+
+fn format_doctor_summary(report: &Value) -> String {
+    let status = if report_bool(report, "ok") {
+        "usable"
+    } else {
+        "needs setup"
+    };
+    let mut lines = vec![format!("PandaCode doctor: {status}")];
+    for runtime in ["bamboo", "claude", "codex"] {
+        let runtime_report = &report[runtime];
+        let runtime_status = if report_bool(runtime_report, "ok") {
+            "available".to_string()
+        } else {
+            report_str(runtime_report, "state")
+                .unwrap_or("unavailable")
+                .to_string()
+        };
+        let mut details = vec![format!("  - {runtime}: {runtime_status}")];
+        if let Some(driver) = report_str(runtime_report, "driver") {
+            details.push(format!("driver={driver}"));
+        }
+        if let Some(active) = format_bamboo_active(runtime_report) {
+            details.push(format!("active={active}"));
+        }
+        let missing = string_array(&runtime_report["missing"]);
+        if !missing.is_empty() {
+            details.push(format!("missing={}", missing.join(",")));
+        }
+        lines.push(details.join(" "));
+    }
+    lines.push("JSON: pandacode doctor --json".to_string());
+    lines.join("\n")
+}
+
+fn format_session_list_summary(report: &Value) -> String {
+    let mut lines = vec!["PandaCode sessions".to_string()];
+    for runtime in ["bamboo", "claude", "codex"] {
+        let sessions = report[runtime].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let mut line = format!("  - {runtime}: {}", sessions.len());
+        if let Some(latest) = sessions.first() {
+            if let Some(session) = report_str(latest, "session") {
+                line.push_str(&format!(" latest={session}"));
+            }
+            if let Some(model) = report_str(latest, "model") {
+                line.push_str(&format!(" model={model}"));
+            }
+            if let Some(run_id) = report_str(latest, "run_id") {
+                line.push_str(&format!(" run={run_id}"));
+            }
+        }
+        lines.push(line);
+    }
+    lines.push("JSON: pandacode list --json".to_string());
+    lines.join("\n")
+}
+
+fn format_models_summary(report: &Value) -> String {
+    let mut lines = vec!["PandaCode models".to_string()];
+    lines.push(format_model_runtime_summary("bamboo", &report["bamboo"]));
+    lines.push(format_model_runtime_summary("claude", &report["claude"]));
+    lines.push(format_model_runtime_summary("codex", &report["codex"]));
+    lines.push("JSON: pandacode models --json".to_string());
+    lines.join("\n")
+}
+
+fn format_model_runtime_summary(runtime: &str, report: &Value) -> String {
+    let mut parts = vec![format!(
+        "  - {runtime}: {}",
+        if report_bool(report, "ok") {
+            "ok"
+        } else {
+            "unavailable"
+        }
+    )];
+    match runtime {
+        "bamboo" => {
+            let models = report["raw"]["models"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            parts.push(format!("models={}", models.len()));
+            let defaults = models
+                .iter()
+                .filter(|model| report_bool(model, "is_default"))
+                .filter_map(format_provider_model)
+                .collect::<Vec<_>>();
+            if !defaults.is_empty() {
+                parts.push(format!("defaults={}", join_limited(defaults, 4)));
+            }
+        }
+        "claude" => {
+            let aliases = string_array(&report["known_aliases"]);
+            if !aliases.is_empty() {
+                parts.push(format!("aliases={}", aliases.join(", ")));
+            }
+        }
+        "codex" => {
+            let models = report["raw"]["models"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            parts.push(format!("models={}", models.len()));
+            let defaults = models
+                .iter()
+                .filter(|model| report_bool(model, "is_default"))
+                .filter_map(format_model_id)
+                .collect::<Vec<_>>();
+            if !defaults.is_empty() {
+                parts.push(format!("default={}", join_limited(defaults, 1)));
+            }
+        }
+        _ => {}
+    }
+    parts.join(" ")
+}
+
+fn format_bamboo_active(report: &Value) -> Option<String> {
+    let active = &report["active"];
+    let provider = report_str(active, "provider")?;
+    let model = report_str(active, "model")?;
+    Some(format!("{provider}/{model}"))
+}
+
+fn format_provider_model(model: &Value) -> Option<String> {
+    let provider = report_str(model, "provider")?;
+    let id = report_str(model, "id")
+        .or_else(|| report_str(model, "model"))
+        .unwrap_or("unknown");
+    Some(format!("{provider}/{id}"))
+}
+
+fn format_model_id(model: &Value) -> Option<String> {
+    report_str(model, "id")
+        .or_else(|| report_str(model, "model"))
+        .map(ToString::to_string)
+}
+
+fn report_bool(report: &Value, key: &str) -> bool {
+    report.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn report_str<'a>(report: &'a Value, key: &str) -> Option<&'a str> {
+    report.get(key).and_then(Value::as_str)
+}
+
+fn string_array(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn join_limited(values: Vec<String>, limit: usize) -> String {
+    if values.len() <= limit {
+        return values.join(", ");
+    }
+    let hidden = values.len() - limit;
+    let mut visible = values.into_iter().take(limit).collect::<Vec<_>>();
+    visible.push(format!("+{hidden}"));
+    visible.join(", ")
 }
 
 fn version_report(program: &str, args: &[&str]) -> serde_json::Value {
@@ -334,8 +516,12 @@ fn version_report(program: &str, args: &[&str]) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvedRuntime, bamboo_provider_for_model, runtime_hint_for_model};
+    use super::{
+        ResolvedRuntime, bamboo_provider_for_model, format_doctor_summary, format_models_summary,
+        format_session_list_summary, runtime_hint_for_model,
+    };
     use crate::config::ProviderKind;
+    use serde_json::json;
 
     #[test]
     fn model_hints_route_to_matching_runtime() {
@@ -373,5 +559,115 @@ mod tests {
             Some(ProviderKind::Minimax)
         );
         assert_eq!(bamboo_provider_for_model("opus"), None);
+    }
+
+    #[test]
+    fn doctor_summary_highlights_runtime_state() {
+        let summary = format_doctor_summary(&json!({
+            "ok": true,
+            "bamboo": {
+                "ok": false,
+                "state": "configuration_needed",
+                "driver": "bamboo-native",
+                "missing": ["api_key"],
+                "active": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro"
+                }
+            },
+            "claude": {
+                "ok": true,
+                "state": "available",
+                "driver": "tmux",
+                "missing": []
+            },
+            "codex": {
+                "ok": true,
+                "state": "available",
+                "driver": "codexctl session",
+                "missing": []
+            }
+        }));
+
+        assert!(summary.contains("PandaCode doctor: usable"));
+        assert!(summary.contains("bamboo: configuration_needed"));
+        assert!(summary.contains("active=deepseek/deepseek-v4-pro"));
+        assert!(summary.contains("missing=api_key"));
+        assert!(summary.contains("claude: available"));
+        assert!(summary.contains("codex: available"));
+        assert!(summary.contains("JSON: pandacode doctor --json"));
+        assert!(!summary.contains('{'));
+    }
+
+    #[test]
+    fn models_summary_compacts_runtime_catalogs() {
+        let summary = format_models_summary(&json!({
+            "ok": true,
+            "bamboo": {
+                "ok": true,
+                "raw": {
+                    "models": [
+                        {
+                            "provider": "deepseek",
+                            "id": "deepseek-v4-pro",
+                            "is_default": true
+                        },
+                        {
+                            "provider": "kimi",
+                            "id": "kimi-k2.6",
+                            "is_default": true
+                        }
+                    ]
+                }
+            },
+            "claude": {
+                "ok": true,
+                "known_aliases": ["haiku", "sonnet", "opus"]
+            },
+            "codex": {
+                "ok": true,
+                "raw": {
+                    "models": [
+                        {
+                            "id": "gpt-5.5",
+                            "is_default": true
+                        },
+                        {
+                            "id": "gpt-5.4",
+                            "is_default": false
+                        }
+                    ]
+                }
+            }
+        }));
+
+        assert!(summary.contains("bamboo: ok models=2"));
+        assert!(summary.contains("defaults=deepseek/deepseek-v4-pro, kimi/kimi-k2.6"));
+        assert!(summary.contains("claude: ok aliases=haiku, sonnet, opus"));
+        assert!(summary.contains("codex: ok models=2 default=gpt-5.5"));
+        assert!(summary.contains("JSON: pandacode models --json"));
+        assert!(!summary.contains('{'));
+    }
+
+    #[test]
+    fn session_list_summary_counts_and_shows_latest() {
+        let summary = format_session_list_summary(&json!({
+            "ok": true,
+            "bamboo": [],
+            "claude": [],
+            "codex": [
+                {
+                    "session": "latest",
+                    "model": "gpt-5.5",
+                    "run_id": "run_123"
+                }
+            ]
+        }));
+
+        assert!(summary.contains("bamboo: 0"));
+        assert!(summary.contains("claude: 0"));
+        assert!(summary.contains("codex: 1 latest=latest model=gpt-5.5 run=run_123"));
+        assert!(summary.contains("JSON: pandacode list --json"));
+        assert!(!summary.contains('{'));
     }
 }

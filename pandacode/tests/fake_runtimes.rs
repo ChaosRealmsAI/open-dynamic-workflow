@@ -61,6 +61,45 @@ fn run_help_explains_common_task_options() {
     }
 }
 
+#[test]
+fn top_level_list_defaults_to_compact_text_and_json_remains_machine_readable() {
+    let root = temp_root("list-compact");
+
+    let output = Command::new(bin())
+        .args(["list", "--cd", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("PandaCode sessions"), "{text}");
+    assert!(text.contains("bamboo: 0"), "{text}");
+    assert!(text.contains("claude: 0"), "{text}");
+    assert!(text.contains("codex: 0"), "{text}");
+    assert!(text.contains("JSON: pandacode list --json"), "{text}");
+    assert!(!text.contains('{'), "{text}");
+
+    let output = Command::new(bin())
+        .args(["list", "--json", "--cd", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["bamboo"].as_array().unwrap().len(), 0);
+    assert_eq!(json["claude"].as_array().unwrap().len(), 0);
+    assert_eq!(json["codex"].as_array().unwrap().len(), 0);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn write_exe(path: &Path, content: &str) {
     fs::write(path, content).unwrap();
     let mut perms = fs::metadata(path).unwrap().permissions();

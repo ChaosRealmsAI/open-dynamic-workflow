@@ -859,6 +859,20 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
         }
     }
 
+    let history_lines = progress
+        .get("result")
+        .and_then(|result| result.get("history"))
+        .and_then(|history| history.as_array())
+        .map(|history| format_workflow_history_for_runs_show(history))
+        .unwrap_or_default();
+    if !history_lines.is_empty() {
+        lines.push("".to_string());
+        lines.push("Workflow history:".to_string());
+        for line in history_lines {
+            lines.push(format!("  - {line}"));
+        }
+    }
+
     let completed_agents = progress
         .get("completed_agent_details")
         .and_then(|value| value.as_array())
@@ -882,6 +896,126 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
     }
 
     lines.join("\n")
+}
+
+fn format_workflow_history_for_runs_show(history: &[serde_json::Value]) -> Vec<String> {
+    history
+        .iter()
+        .filter_map(format_workflow_history_item_for_runs_show)
+        .take(12)
+        .collect()
+}
+
+fn format_workflow_history_item_for_runs_show(item: &serde_json::Value) -> Option<String> {
+    let step = json_string(item, "step")?;
+    let round = item.get("round").and_then(|value| value.as_u64());
+    let tasks = item
+        .get("tasks")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|task| {
+                    json_string(task, "id").or_else(|| task.as_str().map(str::to_string))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let files = item
+        .get("files")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    let blockers = item
+        .get("blockers")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+
+    match step.as_str() {
+        "plan" => {
+            let summary = json_string(item, "summary")
+                .map(|value| format!(" — {}", truncate(&value, 120)))
+                .unwrap_or_default();
+            Some(format!(
+                "plan: {} task(s) {}{}",
+                tasks.len(),
+                truncate(&tasks.join(","), 120),
+                summary
+            ))
+        }
+        "implement" => Some(format!(
+            "implement r{}: {} task(s), {} file(s)",
+            round.unwrap_or(1),
+            tasks.len(),
+            files
+        )),
+        "pre_review_block" => Some(format!(
+            "pre-review block r{}: failed={} scope_issues={}",
+            round.unwrap_or(1),
+            item.get("failed_tasks")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0),
+            item.get("scope_issues")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0)
+        )),
+        "review" => {
+            let decision = json_string(item, "decision").unwrap_or_else(|| "unknown".to_string());
+            let apply_ready = item
+                .get("applyReady")
+                .and_then(|value| value.as_bool())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "false".to_string());
+            Some(format!(
+                "review r{}: {decision} applyReady={apply_ready} blockers={} files={files}",
+                round.unwrap_or(1),
+                blockers
+            ))
+        }
+        "repair_plan" => {
+            let reason = json_string(item, "reason")
+                .map(|value| format!(" reason={value}"))
+                .unwrap_or_default();
+            Some(format!(
+                "repair plan r{}: tasks={} retained_files={}{}",
+                round.unwrap_or(1),
+                truncate(&tasks.join(","), 140),
+                item.get("retained_files")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len)
+                    .unwrap_or(0),
+                reason
+            ))
+        }
+        "repair" => Some(format!(
+            "repair r{}: tasks={} files={} candidate_files={}",
+            round.unwrap_or(1),
+            truncate(&tasks.join(","), 140),
+            files,
+            item.get("candidate_files")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0)
+        )),
+        "verify" => {
+            let ok = item
+                .get("ok")
+                .and_then(|value| value.as_bool())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let guard_ok = item
+                .get("guard")
+                .and_then(|guard| guard.get("ok"))
+                .and_then(|value| value.as_bool())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            Some(format!("verify: ok={ok} guard={guard_ok}"))
+        }
+        _ => Some(truncate(&item.to_string(), 220)),
+    }
 }
 
 fn format_recent_event_for_runs_show(event: &serde_json::Value) -> String {
@@ -2450,6 +2584,52 @@ mod tests {
             root.join(".odw/runs/odw-run-test/state.json"),
             serde_json::to_string_pretty(&json!({
                 "workflow": "test-flow",
+                "result": {
+                    "ok": true,
+                    "history": [
+                        {
+                            "step": "plan",
+                            "summary": "mock planned summary",
+                            "tasks": [
+                                {"id": "alpha", "files": ["a.js"]},
+                                {"id": "beta", "files": ["b.js"]}
+                            ]
+                        },
+                        {
+                            "step": "implement",
+                            "round": 1,
+                            "tasks": ["alpha", "beta"],
+                            "files": ["a.js", "b.js"]
+                        },
+                        {
+                            "step": "review",
+                            "round": 1,
+                            "decision": "reject",
+                            "applyReady": false,
+                            "blockers": ["test failed"],
+                            "files": ["a.js", "b.js"]
+                        },
+                        {
+                            "step": "repair_plan",
+                            "round": 2,
+                            "tasks": ["beta"],
+                            "retained_files": ["a.js"]
+                        },
+                        {
+                            "step": "review",
+                            "round": 2,
+                            "decision": "approve",
+                            "applyReady": true,
+                            "blockers": [],
+                            "files": ["a.js", "b.js"]
+                        },
+                        {
+                            "step": "verify",
+                            "ok": true,
+                            "guard": {"ok": true, "files": 0}
+                        }
+                    ]
+                },
                 "activeAgents": {
                     "active-node": {
                         "key": "active-node",
@@ -2486,6 +2666,13 @@ mod tests {
         );
         assert_eq!(shown["progress"]["completed_agents"], 0);
         assert_eq!(
+            shown["progress"]["result"]["history"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        assert_eq!(
             shown["progress"]["active_agents"].as_array().unwrap().len(),
             1
         );
@@ -2493,6 +2680,12 @@ mod tests {
         assert!(view.contains("last: Latest active status"));
         assert!(view.contains("Report: "));
         assert!(view.contains("report.html"));
+        assert!(view.contains("Workflow history:"));
+        assert!(view.contains("plan: 2 task(s) alpha,beta"));
+        assert!(view.contains("review r1: reject applyReady=false blockers=1 files=2"));
+        assert!(view.contains("repair plan r2: tasks=beta retained_files=1"));
+        assert!(view.contains("review r2: approve applyReady=true blockers=0 files=2"));
+        assert!(view.contains("verify: ok=true guard=true"));
         assert!(
             view.contains(
                 "[workflow] done test-flow result ok=true decision=approve applyReady=true applied=4 failed=0 verifyGuard=true"

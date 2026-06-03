@@ -593,7 +593,7 @@ fn runs_list_report(root: &Path) -> Result<serde_json::Value> {
             }
         }
     }
-    runs.sort_by(|left, right| run_list_sort_key(right).cmp(&run_list_sort_key(left)));
+    runs.sort_by_key(|value| std::cmp::Reverse(run_list_sort_key(value)));
     Ok(json!({
         "runs_dir": runs_dir,
         "runs": runs

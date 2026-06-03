@@ -76,6 +76,39 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
     } else {
         prompt_file.clone()
     };
+    let initial_control = new_codex_control(&root, &session_name)?;
+    let mut record = SessionRecord::new(RUNTIME, &session_name, "codexctl-session", &root);
+    record.model = Some(model.clone());
+    record.effort = Some(effort.clone());
+    record.permission = Some(permission.as_value().to_string());
+    record.artifacts = json!({
+        "prompt_file": prompt_file,
+        "dispatch_prompt_file": dispatch_prompt_file,
+        "transport": if dispatch_prompt.is_some() { "file_reference" } else { "direct" },
+        "transport_retries": 0,
+        "log_dir": initial_control.log_dir.to_string_lossy().to_string(),
+        "session_socket": initial_control.session_socket.to_string_lossy().to_string()
+    });
+    remember_codex_status(
+        &mut record,
+        "starting",
+        &json!({
+            "ok": true,
+            "status": "starting",
+            "current_phase": "starting",
+            "run_id": null,
+            "thread_id": null,
+            "thread_path": null,
+            "turn_id": null,
+            "log_path": initial_control.log_dir.join("latest.jsonl").to_string_lossy().to_string(),
+            "last_agent_message": null,
+            "counts": null,
+            "usage": null,
+            "errors": null,
+            "warnings": null
+        }),
+    );
+    session::save(&root, &mut record)?;
     let (control, command, output, transport_retries) = run_codex_start_with_retry(
         &root,
         &session_name,
@@ -85,7 +118,6 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
         &effort,
     )?;
     let raw = parse_json_or_null(&output.stdout);
-    let mut record = SessionRecord::new(RUNTIME, &session_name, "codexctl-session", &root);
     update_record_ids(&mut record, raw.as_ref());
     record.model = Some(model.clone());
     record.effort = Some(effort.clone());
@@ -460,8 +492,21 @@ fn answer(args: AnswerCommandArgs) -> Result<()> {
 fn status(args: SessionCommandArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
     let record = session::load(&root, RUNTIME, &args.session)?;
-    let run_id = require_run_id(&record)?;
     let control = record_codex_control(&root, &record)?;
+    let Some(run_id) = record.run_id.clone() else {
+        return output_json(&json!({
+            "ok": true,
+            "runtime": RUNTIME,
+            "action": "status",
+            "session": record.session,
+            "state": stored_codex_state(&record),
+            "summary": stored_codex_summary(&record),
+            "live_read_unavailable": true,
+            "output_tail": "",
+            "command": null,
+            "record": record
+        }));
+    };
     let command = codex_read_command(&args.bins, &run_id, &control, false);
     let output = run_capture(&command, Some(&root))?;
     let raw = parse_json_or_null(&output.stdout);
@@ -493,8 +538,26 @@ fn status(args: SessionCommandArgs) -> Result<()> {
 fn logs(args: LogsCommandArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
     let record = session::load(&root, RUNTIME, &args.session)?;
-    let run_id = require_run_id(&record)?;
     let control = record_codex_control(&root, &record)?;
+    let Some(run_id) = record.run_id.clone() else {
+        if args.json {
+            return output_json(&json!({
+                "ok": true,
+                "runtime": RUNTIME,
+                "action": "logs",
+                "session": record.session,
+                "tail": args.tail,
+                "state": stored_codex_state(&record),
+                "summary": stored_codex_summary(&record),
+                "live_read_unavailable": true,
+                "output_tail": stored_codex_log_tail(&record, args.tail),
+                "command": null,
+                "record": record
+            }));
+        }
+        println!("{}", stored_codex_log_tail(&record, args.tail));
+        return Ok(());
+    };
     let command = codex_read_command(&args.bins, &run_id, &control, true);
     let output = run_capture(&command, Some(&root))?;
     if args.json {

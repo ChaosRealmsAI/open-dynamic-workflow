@@ -4,7 +4,7 @@ use std::{
     net::{TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -124,6 +124,9 @@ if [[ "${1:-}" == "session" ]]; then
   action="${2:-}"
   case "$action" in
     start)
+      if [[ -n "${FAKE_CODEX_START_SLEEP:-}" ]]; then
+        sleep "$FAKE_CODEX_START_SLEEP"
+      fi
       printf '{"run_id":"run_fake","thread_id":"thread_fake","thread_path":"/tmp/thread.jsonl","status":"completed","current_phase":"completed"}\n'
       ;;
     send)
@@ -1212,6 +1215,79 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_status_is_visible_while_start_is_running() {
+    let root = temp_root("codex-start-visible");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let codexctl = bin_dir.join("codexctl");
+    let codex = bin_dir.join("codex");
+    fake_codexctl(&codexctl);
+    fake_codex(&codex);
+
+    let common = [
+        "--cd",
+        root.to_str().unwrap(),
+        "--codexctl-bin",
+        codexctl.to_str().unwrap(),
+        "--codex-bin",
+        codex.to_str().unwrap(),
+    ];
+    let child = Command::new(bin())
+        .env("FAKE_CODEX_START_SLEEP", "1")
+        .args(["codex", "exec", "--task", "slow start"])
+        .args(common)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let latest = root.join(".pandacode/sessions/codex/latest.json");
+    for _ in 0..40 {
+        if latest.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        latest.exists(),
+        "codex session latest pointer should exist while start is still running"
+    );
+
+    let output = Command::new(bin())
+        .args(["codex", "status", "--session", "latest"])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["ok"], true);
+    assert_eq!(status["state"], "starting");
+    assert_eq!(status["live_read_unavailable"], true);
+    assert_eq!(status["summary"]["status"], "starting");
+
+    let output = Command::new(bin())
+        .args(["list", "--cd", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let list = String::from_utf8_lossy(&output.stdout);
+    assert!(list.contains("codex: 1"), "{list}");
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

@@ -442,6 +442,24 @@ integration test, so the gate fails if any parity behavior regresses.
 - **claude token accounting.** claude nodes report token usage (parsed from the
   Claude Code session transcript), so `budget` counts them like codex/bamboo.
 
+### Where the built-in tool is better
+
+Honest tradeoffs — reach for the built-in Workflow when these matter:
+
+- **Zero setup.** It runs inside Claude Code with no install; ODW needs the `odw`
+  binary, Node, and (for real runs) PandaCode + runtime CLIs on PATH.
+- **Live progress.** Its progress tree updates in-terminal as agents run; ODW's
+  HTML graph is rendered after the run (the live signal is `events.jsonl`).
+- **Real subagent types.** `agentType` there selects a custom Claude subagent with
+  its own system prompt and toolset; ODW has no subagent registry, so `agentType`
+  is only a routing/tag value — `runtime` (`codex`/`claude`/`bamboo`) is the real
+  selector. Prose/analysis/structured-output nodes should target `claude`.
+- **Automatic schema retry.** It keeps re-prompting until structured output
+  validates; ODW attempts once by default (`maxAttempts:1`) — pass `retry`.
+- **Output-token budgets.** Its `budget.spent()` counts output tokens (matching
+  Claude Code's `+Nk` metering); ODW counts total tokens, so the same ceiling
+  trips much sooner here. Size ODW budgets in total tokens.
+
 ## Status
 
 Implemented now:

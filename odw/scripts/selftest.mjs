@@ -890,18 +890,31 @@ if (s === "status_noise") {
   process.exit(0);
 }
 if (s === "review_workspace_probe") {
-  const { existsSync } = await import("node:fs");
+  const { existsSync, readFileSync } = await import("node:fs");
   const sawCandidate = existsSync("review-candidate.txt");
+  const taskFileIndex = args.indexOf("--task-file");
+  const promptFile = taskFileIndex >= 0 ? args[taskFileIndex + 1] : "";
+  const prompt = promptFile ? readFileSync(promptFile, "utf8") : "";
+  const sawLandingNote =
+    prompt.includes("New files from the captured diff may appear as untracked") &&
+    prompt.includes("applyWorktreeDiffs");
+  const ok = sawCandidate && sawLandingNote;
   process.stdout.write(JSON.stringify({
     ok: true,
     state: "completed",
     runtime: args[0] || "",
-    decision: sawCandidate ? "approve" : "reject",
-    summary: sawCandidate ? "candidate file exists in reviewer cwd" : "candidate file missing from reviewer cwd",
-    blockers: sawCandidate ? [] : ["candidate file missing"],
+    decision: ok ? "approve" : "reject",
+    summary: ok ? "candidate file exists and new-file landing note is present" : "review workspace probe failed",
+    blockers: [
+      ...(sawCandidate ? [] : ["candidate file missing"]),
+      ...(sawLandingNote ? [] : ["new-file landing note missing"])
+    ],
     risks: [],
     owner_questions: [],
-    verification: [sawCandidate ? "review workspace contained candidate file" : "review workspace did not contain candidate file"],
+    verification: [
+      sawCandidate ? "review workspace contained candidate file" : "review workspace did not contain candidate file",
+      sawLandingNote ? "review prompt explained untracked new-file landing" : "review prompt did not explain untracked new-file landing"
+    ],
     files_reviewed: ["review-candidate.txt"]
   }) + "\\n");
   process.exit(0);

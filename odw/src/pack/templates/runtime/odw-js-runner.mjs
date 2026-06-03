@@ -1755,6 +1755,11 @@ The combined diff has already been applied to your current working directory for
 this review node. Inspect the files and run relevant tests/checks there. Do not
 edit files.
 
+New files from the captured diff may appear as untracked in git status inside
+this temporary review workspace. Do not treat that alone as a landing blocker:
+approval lands the captured patch with applyWorktreeDiffs, including new files
+listed below.
+
 Files:
 ${files.map((file) => `- ${file}`).join("\n")}
 

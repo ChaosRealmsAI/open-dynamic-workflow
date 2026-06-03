@@ -1288,6 +1288,39 @@ test("examples: parallel-review-apply treats secondary file mentions as repair e
   }
 });
 
+test("examples: parallel-review-apply defaults to three review rounds for 3+ tasks", () => {
+  const { dir } = makeGitRepo("odw-example-07-default-rounds-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('default rounds verify ok')\"",
+      tasks: [
+        { id: "code", file: "src/default-rounds.js", prompt: "Create src/default-rounds.js." },
+        { id: "tests", file: "test-default-rounds.mjs", prompt: "Create test-default-rounds.mjs." },
+        { id: "docs", file: "docs/default-rounds.md", prompt: "Create docs/default-rounds.md." }
+      ],
+      reviewers: [
+        {
+          label: "default-rounds-review",
+          runtime: "codex",
+          perspective: "MOCK_REJECT_TWICE_FILE:docs/default-rounds.md"
+        }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `example 07 default rounds run failed: ${r.out.slice(-1200)}`);
+    assert(/round 2\/3/.test(r.out) && /round 3\/3/.test(r.out), `run did not use three default rounds: ${r.out.slice(-1200)}`);
+    const result = r.state.result;
+    const reviews = result.history.filter((item) => item.step === "review");
+    assert(reviews.map((item) => item.decision).join("|") === "reject|reject|approve", `wrong review sequence: ${JSON.stringify(reviews)}`);
+    const repairPlans = result.history.filter((item) => item.step === "repair_plan");
+    assert(repairPlans.length === 2, `expected two repair plans: ${JSON.stringify(repairPlans)}`);
+    assert(repairPlans.every((item) => item.tasks?.join("|") === "docs"), `wrong default-round repair tasks: ${JSON.stringify(repairPlans)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply blocks failed or cross-owned implementation before review", () => {
   const { dir } = makeGitRepo("odw-example-07-pre-review-block-");
   try {

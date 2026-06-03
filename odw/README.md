@@ -183,11 +183,14 @@ The built-in starter is the large-project path: parallel Codex worktrees,
 candidate-worktree review, bounded repair/re-review, approve-only atomic
 landing, and read-only final verification. It repairs failed implementation
 nodes or cross-owned file edits before review; declare each task with `task.file`
-or `task.files`, and set `strictTaskFileBoundaries:false` only with explicit
-owner intent. It also refuses to run when declared task files are already dirty,
-because isolated worktrees branch from `HEAD`; commit/stash those files first or
-pass `allowDirtyTaskFiles:true` only when the owner accepts that workers will not
-see the dirty changes.
+or `task.files` when you want maximum control. For lower decision cost, pass a
+high-level `request` or `spec` without `tasks`; the starter first asks a
+structured planner to produce owned task files, then runs the same preflight,
+review, apply, and verification gates. Set `strictTaskFileBoundaries:false` only
+with explicit owner intent. It also refuses to run when declared task files are
+already dirty, because isolated worktrees branch from `HEAD`; commit/stash those
+files first or pass `allowDirtyTaskFiles:true` only when the owner accepts that
+workers will not see the dirty changes.
 
 Then write or adapt a workflow with this shape:
 

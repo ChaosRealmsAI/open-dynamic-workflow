@@ -19,14 +19,20 @@ possible, lands only `approve` gates atomically, and then verifies the main
 working directory under a read-only snapshot guard. If final verification
 modifies files after approval, the run restores those unapproved changes and
 fails instead of bypassing review.
+Pass explicit `args.tasks` when decomposition and file ownership are already
+known. For lower decision cost, pass `args.request` or `args.spec` without
+`tasks`; the starter first runs a structured planning node that returns owned
+task files, then sends that plan through the same preflight, review, apply, and
+verification gates.
 Each task must declare a stable unique `id`; ODW uses task ids for node keys,
 sessions, repair history, and reports. Each task must also declare a non-empty
 string `prompt`; empty or non-string prompts are rejected before worktrees are
 created.
 Before review, it blocks failed implementation nodes and cross-owned file edits.
-Use `task.file` or `task.files` to declare each task's ownership. Use a separate
-planning step for exploratory work, or set `allowUndeclaredTaskFiles:true` only
-when the owner accepts weaker ownership checks. Declared files must be normalized
+Use `task.file` or `task.files` to declare each task's ownership. Use the
+built-in request/spec planner for exploratory decomposition, or set
+`allowUndeclaredTaskFiles:true` only when the owner accepts weaker ownership
+checks. Declared files must be normalized
 repo-relative paths outside `.git`, `.odw`, `.pandacode`, and `node_modules`;
 absolute paths, backslashes, and `..` escapes are rejected before worktrees are
 created. Set `strictTaskFileBoundaries:false` only with explicit owner intent.

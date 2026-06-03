@@ -1974,7 +1974,7 @@ fn capabilities_json() -> serde_json::Value {
             },
             "starter": {
                 "cli": "odw starter parallel-review-apply > wf.js",
-                "note": "Prints a built-in large-project starter workflow: parallel worktrees, candidate-worktree review gate, targeted repair/re-review, approve-only atomic landing, and read-only final verification guarded/restored by a main-worktree snapshot."
+                "note": "Prints a built-in large-project starter workflow: optional request/spec planner, parallel worktrees, candidate-worktree review gate, targeted repair/re-review, approve-only atomic landing, and read-only final verification guarded/restored by a main-worktree snapshot."
             },
             "error_feedback": {
                 "schema": ".odw/schemas/error-feedback.schema.json",

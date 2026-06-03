@@ -26,13 +26,16 @@ odw exec --script examples/01-single-node.js --backend pandacode --json
 | `04-bamboo-provider.js` | Bamboo domestic-provider dispatch with `runtime:"bamboo"` and `pandacode.bamboo(...)` |
 | `05-heterogeneous-models.js` | fan one question across several different models in parallel (deepseek/qwen/kimi), reconcile with claude — ODW's heterogeneous-executor edge |
 | `06-build-project.js` | build a real project end-to-end: codex implements → claude reviews → codex fixes + runs the test command until green (the dogfood KV-store / roman-numeral shape) |
-| `07-parallel-review-apply.js` | large-project parallel landing: Codex worktrees → `reviewWorktreeDiffs` candidate workspace → bounded repair/re-review on reject → approve-only atomic `applyWorktreeDiffs` → read-only verification guard |
+| `07-parallel-review-apply.js` | large-project parallel landing: optional request/spec planner → Codex worktrees → `reviewWorktreeDiffs` candidate workspace → bounded repair/re-review on reject → approve-only atomic `applyWorktreeDiffs` → read-only verification guard |
 
 Real `worktree` runs require `cwd` to be a git repository, and any spec/fixture
 the agent must read should be committed first (the worktree branches from HEAD).
 Example 07 intentionally lands approved changes into `cwd`; run it from the
 target project or a disposable git repo. It treats caller-supplied context and
-task prompts as owner intent, repairs blocker-matched tasks up to
+task prompts as owner intent. Pass explicit `args.tasks` when you want full
+control; pass a high-level `args.request` or `args.spec` without `tasks` when
+you want the starter to plan owned task files first. It repairs
+blocker-matched tasks up to
 `args.maxReviewRounds` (default 2 for small batches and 3 for 3+ tasks), falls back to full-batch repair when blockers
 cannot be mapped to task files, stops for `needs_owner`, and treats final
 verification as read-only: any post-approval file mutation fails the run and is
@@ -43,7 +46,7 @@ string `prompt`; empty or non-string prompts are rejected before worktrees are
 created.
 Before review, it also blocks failed implementation nodes and cross-owned file
 edits. Declare one `task.file` or multiple `task.files` for each task. Use a
-separate planning step for exploratory work, or set
+built-in request/spec planner for exploratory decomposition, or set
 `allowUndeclaredTaskFiles:true` only when the owner accepts weaker ownership
 checks. Declared files must be normalized repo-relative paths outside `.git`,
 `.odw`, `.pandacode`, and `node_modules`; absolute paths, backslashes, and `..`

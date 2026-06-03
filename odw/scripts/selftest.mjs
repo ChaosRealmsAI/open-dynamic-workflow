@@ -1602,6 +1602,7 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
   assert(/undeclared_task_files/.test(starter.out) && /allowUndeclaredTaskFiles/.test(starter.out), "starter output missing undeclared task-file guard");
   assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
   assert(/duplicate_task_files/.test(starter.out) && /allowDuplicateTaskFiles/.test(starter.out), "starter output missing duplicate task-file guard");
+  assert(/TASK_PLAN_SCHEMA/.test(starter.out) && /planning_failed/.test(starter.out), "starter output missing high-level request planner");
   assert(/Planned task contracts/.test(starter.out) && /Current task/.test(starter.out), "starter output missing shared task context injection");
   assert(/Do not invent package entrypoints/.test(starter.out) && /do not skip tests/.test(starter.out), "starter output missing tests/docs ownership guard");
   assert(/captureMainWorktreeSnapshot/.test(starter.out) && /permission: "limited"/.test(starter.out), "starter output missing read-only final verification guard");
@@ -1623,6 +1624,31 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
     assert(r.code === 0, `starter output workflow failed: ${r.out.slice(-700)}`);
     assert(existsSync(join(dir, "docs/one.md")) && existsSync(join(dir, "docs/two.md")), "starter output did not land docs files");
     assert(ev(r.events, "worktree_review_gate").some((e) => e.decision === "approve"), "starter output missing approve gate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("examples: parallel-review-apply can plan tasks from a high-level request", () => {
+  const { dir } = makeGitRepo("odw-starter-plan-");
+  const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+  try {
+    const input = {
+      request: "Create a small three-part docs slice from this high-level request.",
+      test: "node -e \"console.log('planned verify ok')\""
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `planned starter workflow failed: ${r.out.slice(-900)}`);
+    const result = r.state.result;
+    assert(result?.history?.[0]?.step === "plan", `history missing plan step: ${JSON.stringify(result?.history)}`);
+    assert(
+      result.history[0].tasks.map((task) => task.id).join("|") === "task-a|task-b|task-c",
+      `planner tasks not preserved: ${JSON.stringify(result.history[0].tasks)}`
+    );
+    assert(existsSync(join(dir, "mock-a.txt")), "planned task-a file was not landed");
+    assert(existsSync(join(dir, "mock-b.txt")), "planned task-b file was not landed");
+    assert(existsSync(join(dir, "mock-c.txt")), "planned task-c file was not landed");
+    assert(ev(r.events, "agent_done").some((e) => e.label === "plan-tasks"), "missing planner agent_done event");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

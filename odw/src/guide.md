@@ -157,14 +157,19 @@ odw exec --script wf.js --backend pandacode --json
   of landing on `needs_owner`. Final verification is guarded by a main-worktree
   snapshot; if the verifier modifies files after approval, the run restores
   those unapproved changes and fails instead of silently bypassing review.
+  Pass explicit `args.tasks` when you want full control over decomposition. For
+  lower decision cost, pass `args.request` or `args.spec` without `tasks`; the
+  starter first runs a structured planning node that returns owned task files,
+  then sends that plan through the same preflight, review, apply, and
+  verification gates.
   Every task must declare a stable unique `id`; ODW uses it for node keys,
   sessions, repair history, and reports. Every task must also declare a
   non-empty string `prompt`; empty or non-string prompts are rejected before
   worktrees are created.
   By default each task must declare ownership with `task.file` / `task.files`
   and stay inside that declared file list; failed implementation nodes or
-  cross-owned file edits are repaired before any review/apply gate runs. Use a
-  separate planning step for exploratory work, or pass
+  cross-owned file edits are repaired before any review/apply gate runs. Use
+  the built-in request/spec planner for exploratory decomposition, or pass
   `allowUndeclaredTaskFiles:true` only when the owner explicitly accepts weaker
   ownership checks. Declared files must be normalized repo-relative paths outside
   `.git`, `.odw`, `.pandacode`, and `node_modules`; ODW rejects absolute paths,

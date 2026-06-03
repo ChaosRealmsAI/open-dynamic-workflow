@@ -2,7 +2,8 @@
 //
 // This is the reusable large-project shape:
 //
-//   parallel implementation worktrees
+//   optional high-level request planner
+//     -> parallel implementation worktrees
 //     -> reviewWorktreeDiffs(...) in a temporary candidate worktree
 //     -> applyWorktreeDiffs(...) atomically only after approve
 //     -> final verification in the main working directory
@@ -18,11 +19,15 @@
 //   odw exec --script /path/to/odw/examples/07-parallel-review-apply.js \
 //     --backend pandacode \
 //     --input '{"test":"npm test","tasks":[{"id":"docs","file":"docs/agent-loop.md","prompt":"Create docs/agent-loop.md explaining the agent loop."}]}'
+//
+// Lower decision-cost run: pass `request` or `spec` instead of `tasks`; the
+// starter plans owned task files first, then reuses the same review/apply gate.
 
 export const meta = {
   name: "parallel-review-apply",
   description: "Implement independent tasks in worktrees, review the combined candidate, then land atomically.",
   phases: [
+    { title: "Plan" },
     { title: "Implement" },
     { title: "Review Gate" },
     { title: "Repair" },
@@ -45,8 +50,100 @@ export default async function workflow() {
     },
   ];
 
-  const TASKS = Array.isArray(args?.tasks) && args.tasks.length ? args.tasks : DEFAULT_TASKS;
   const TEST = args?.test || "echo 'no test command configured'";
+  const REQUEST = String(args?.request || args?.spec || args?.goal || "").trim();
+  const TASK_PLAN_SCHEMA = {
+    title: "task-plan.schema.json",
+    type: "object",
+    required: ["status", "summary", "tasks"],
+    properties: {
+      status: { enum: ["planned"] },
+      summary: { type: "string" },
+      tasks: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["id", "prompt"],
+          properties: {
+            id: { type: "string" },
+            title: { type: "string" },
+            file: { type: "string" },
+            files: { type: "array", items: { type: "string" } },
+            prompt: { type: "string" },
+            verify: { type: "string" },
+            runtime: { type: "string" },
+            permission: { type: "string" },
+          },
+        },
+      },
+      risks: { type: "array", items: { type: "string" } },
+    },
+  };
+  const normalizePlannedTask = (task, index) => {
+    const normalized = {
+      ...task,
+      id: String(task?.id || `task-${index + 1}`).trim(),
+      prompt: String(task?.prompt || "").trim(),
+    };
+    if (Array.isArray(task?.files)) {
+      normalized.files = task.files;
+    }
+    if (Object.prototype.hasOwnProperty.call(task || {}, "file")) {
+      normalized.file = task.file;
+    }
+    return normalized;
+  };
+  let planned = null;
+  let TASKS = Array.isArray(args?.tasks) && args.tasks.length ? args.tasks : null;
+  if (!TASKS && REQUEST) {
+    phase("Plan", "Decompose the high-level request into owned parallel tasks.");
+    planned = await agent(
+      `Decompose this owner request into independently owned implementation tasks for the ODW parallel-review-apply starter.
+
+Owner request:
+${REQUEST}
+
+Run context:
+${args?.context || REQUEST}
+
+Verification command:
+${TEST}
+
+Return 2-6 tasks when practical. Each task must:
+- have a stable short kebab-case id;
+- declare repo-relative owned files with file or files;
+- avoid duplicate file ownership across parallel tasks;
+- avoid .git, .odw, .pandacode, node_modules, absolute paths, and .. paths;
+- include a concrete prompt that states public API/data contracts when relevant;
+- include tests/docs as owned files when the request needs them;
+- keep dependent public entrypoints, tests, and docs explicit rather than implied.
+
+If the request is broad, choose a small coherent first slice that can be reviewed and verified safely.`,
+      {
+        id: "plan-tasks",
+        label: "plan-tasks",
+        runtime: args?.plannerRuntime || "codex",
+        permission: args?.plannerPermission || "limited",
+        schema: TASK_PLAN_SCHEMA,
+        schemaDescription: "Final response is a structured implementation task plan for the parallel-review-apply starter.",
+        retry: { maxAttempts: Math.max(1, Math.min(4, Number(args?.plannerMaxAttempts || 3))) },
+      }
+    );
+    if (!planned || planned?.ok === false || !Array.isArray(planned.tasks) || planned.tasks.length === 0) {
+      return {
+        ok: false,
+        error: {
+          category: "planning_failed",
+          message: "The high-level request planner did not return a usable task list.",
+        },
+        planned,
+        hint:
+          "Pass explicit args.tasks, provide a narrower args.request/spec, or retry with a plannerRuntime that handles structured JSON reliably.",
+      };
+    }
+    TASKS = planned.tasks.map(normalizePlannedTask);
+  }
+  TASKS = TASKS || DEFAULT_TASKS;
   const defaultReviewRounds = TASKS.length >= 3 ? 3 : 2;
   const maxReviewRounds = Math.max(1, Math.min(4, Number(args?.maxReviewRounds || defaultReviewRounds)));
   const strictTaskFileBoundaries = args?.strictTaskFileBoundaries !== false;
@@ -337,7 +434,7 @@ Constraints:
           isolation: "worktree",
           permission: task.permission || "max",
           // Mock backend only: makes the dry run produce a real captured diff.
-          mockWriteFile: task.mockFile || task.file,
+          mockWriteFile: task.mockFile || task.file || task.files?.[0],
           mockFail: Boolean(task.mockFail),
         })
       ),
@@ -349,7 +446,7 @@ Constraints:
       .map(({ task, result }) => ({
         ...result,
         taskId: task.id,
-        taskFile: task.file || null,
+        taskFile: task.file || task.files?.[0] || null,
         taskFiles: taskFiles(task),
       }));
     const failedTasks = annotated
@@ -527,6 +624,18 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
   });
 
   const history = [];
+  if (planned) {
+    history.push({
+      step: "plan",
+      status: planned.status,
+      summary: planned.summary,
+      tasks: TASKS.map((task) => ({
+        id: task.id,
+        files: taskFiles(task),
+      })),
+      risks: planned.risks || [],
+    });
+  }
   let implementation = await runImplementationRound(1);
   let candidates = implementation.candidates;
   history.push({
@@ -550,6 +659,7 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
         failed_tasks: preReviewIssues.failedTasks.map((item) => ({
           id: item.task.id,
           file: item.task.file || null,
+          files: taskFiles(item.task),
           message: item.message,
         })),
         scope_issues: preReviewIssues.scopeIssues.map((item) => ({
@@ -677,7 +787,7 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
     `Read-only verification for the approved batch now landed in the main working directory.
 
 Tasks:
-${TASKS.map((task) => `- ${task.id}: ${task.file || "(files from prompt)"}`).join("\n")}
+${TASKS.map((task) => `- ${task.id}: ${taskFiles(task).join(", ") || task.file || "(files from prompt)"}`).join("\n")}
 
 Run this command and report the exact result:
 ${TEST}

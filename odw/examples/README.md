@@ -49,6 +49,10 @@ checks. Declared files must be normalized repo-relative paths outside `.git`,
 `.odw`, `.pandacode`, and `node_modules`; absolute paths, backslashes, and `..`
 escapes are rejected before worktrees are created. Set
 `strictTaskFileBoundaries:false` only with explicit owner intent.
+Test and documentation tasks should target the declared files and exports from
+the planned task set. If a required public entrypoint is missing from task
+ownership, treat it as a planning blocker or add it to a task; do not invent
+undeclared entrypoints or skip tests to make isolated verification pass.
 Because isolated worktrees branch from `HEAD`, it also blocks dirty declared
 task files before implementation; commit/stash them first, or set
 `allowDirtyTaskFiles:true` only when the owner accepts that workers will not see

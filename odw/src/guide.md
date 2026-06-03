@@ -171,6 +171,10 @@ odw exec --script wf.js --backend pandacode --json
   backslashes, and `..` escapes before creating worktrees. Set
   `strictTaskFileBoundaries:false` only when the owner explicitly wants
   cross-file task overlap.
+  Test and documentation tasks should target the declared files and exports from
+  the planned task set. If a required public entrypoint is missing from task
+  ownership, treat it as a planning blocker or add it to a task; do not invent
+  undeclared entrypoints or skip tests to make isolated verification pass.
   Because isolated worktrees branch from `HEAD`, the starter also refuses to run
   when declared task files already have uncommitted changes; commit/stash them
   first, or pass `allowDirtyTaskFiles:true` only when the owner accepts that

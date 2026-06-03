@@ -508,6 +508,8 @@ function appendSchemaContract(prompt, descriptor, schemaDescription = "") {
   }
   lines.push(
     `When the task is complete, make your final assistant response exactly one JSON object that satisfies ${descriptor.name}.`,
+    "The final response must start with { and end with }. Put every decision, failure, blocker, and verification detail inside that JSON object.",
+    "Never answer a schema node with plain prose, markdown bullets, a bare decision word, or a fenced code block.",
     "Do not wrap the final JSON in markdown fences. Do not add prose before or after the final JSON object.",
     "If you attempted the task but cannot complete it, make the final assistant response an object matching .odw/schemas/error-feedback.schema.json instead of prose.",
     "Required JSON Schema:",
@@ -1055,7 +1057,9 @@ function retryPrompt(originalPrompt, failure, schema = null, schemaDescription =
     truncateJson(failure?.context?.previous_result, 6000),
     "",
     "Retry instruction:",
-    "Do the same node task again. Preserve the original intent, fix only the failed contract, and return output that satisfies the requested schema."
+    "Do the same node task again. Preserve the original intent, fix only the failed contract, and return output that satisfies the requested schema.",
+    "Your final response must be JSON only: start with {, end with }, no markdown, no prose, no bare approve/reject/needs_owner word.",
+    "If the node is a review and the decision is reject or needs_owner, put the evidence into blockers, risks, owner_questions, and verification fields instead of explaining outside JSON."
   ].filter(Boolean).join("\n"), schema, schemaDescription);
 }
 
@@ -1773,6 +1777,20 @@ Return decision:
 - approve: safe to apply atomically after this gate.
 - reject: do not apply; blockers or failed verification must be fixed first.
 - needs_owner: owner/product decision is required before AI should land the batch.
+
+Required final response shape:
+{
+  "decision": "approve|reject|needs_owner",
+  "summary": "one concise verdict",
+  "blockers": ["required fixes before landing"],
+  "risks": ["non-blocking risks"],
+  "owner_questions": ["only consequential owner decisions not already specified"],
+  "verification": ["commands run or evidence inspected"],
+  "files_reviewed": ["path/to/file"]
+}
+
+Return that JSON object only. If rejecting, do not write prose; put every failure
+and command result into blockers and verification.
 
 Combined diff:
 ${diffText}`;

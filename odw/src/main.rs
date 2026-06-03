@@ -2380,6 +2380,8 @@ mod tests {
         assert!(ODW_JS_RUNNER.contains("globalThis.args"));
         assert!(ODW_JS_RUNNER.contains("appendSchemaContract"));
         assert!(ODW_JS_RUNNER.contains("ODW final response contract"));
+        assert!(ODW_JS_RUNNER.contains("The final response must start with { and end with }"));
+        assert!(ODW_JS_RUNNER.contains("Required final response shape"));
         assert!(ODW_JS_RUNNER.contains("resolveSchemaDescription"));
         // Built-in Workflow parity surface (guards against runtime regressions).
         assert!(ODW_JS_RUNNER.contains("getMaxConcurrency"));

@@ -2077,6 +2077,9 @@ fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
+const STALE_ACTIVE_RUN_MS: u64 = 24 * 60 * 60 * 1000;
+const RUN_RETENTION_GRACE_MS: u64 = 60 * 60 * 1000;
+
 /// Keep only the most recent `ODW_RUNS_KEEP` run dirs under `.odw/runs` (default
 /// 50; 0 disables). Run dirs are named `odw-exec-<epoch_ms>-<n>`, so the lexical
 /// order from `sorted_dirs` is chronological — the oldest are deleted first.
@@ -2101,10 +2104,12 @@ fn prune_runs_keeping(runs_dir: &Path, keep: usize, protect: &[&Path]) {
         return;
     }
     // Protected dirs (the run we just created + the run being resumed) are never
-    // pruned, so a concurrent `odw exec` in the same repo cannot delete this
-    // run's in-progress dir out from under it.
+    // pruned. Other active/fresh run dirs are also skipped so concurrent
+    // `odw exec` processes in the same repo cannot delete each other's
+    // in-progress dir out from under them.
     let protected: Vec<_> = protect.iter().filter_map(|path| path.file_name()).collect();
     let remove_count = dirs.len() - keep;
+    let now_ms = now_millis() as u64;
     for dir in dirs.into_iter().take(remove_count) {
         if dir
             .file_name()
@@ -2112,8 +2117,47 @@ fn prune_runs_keeping(runs_dir: &Path, keep: usize, protect: &[&Path]) {
         {
             continue;
         }
+        if !run_dir_prunable(&dir, now_ms) {
+            continue;
+        }
         let _ = fs::remove_dir_all(&dir);
     }
+}
+
+fn run_dir_prunable(dir: &Path, now_ms: u64) -> bool {
+    let record_path = dir.join("run.json");
+    if let Ok(content) = fs::read_to_string(&record_path)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        let status = value
+            .get("status")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        let finished_or_started_ms = value
+            .get("finished_ms")
+            .and_then(|item| item.as_u64())
+            .or_else(|| value.get("started_ms").and_then(|item| item.as_u64()))
+            .or_else(|| {
+                value
+                    .get("run_id")
+                    .and_then(|item| item.as_str())
+                    .and_then(run_id_started_ms)
+            })
+            .unwrap_or(now_ms);
+        if matches!(status, "completed" | "failed" | "error" | "stopped") {
+            return now_ms.saturating_sub(finished_or_started_ms) > RUN_RETENTION_GRACE_MS;
+        }
+        return now_ms.saturating_sub(finished_or_started_ms) > STALE_ACTIVE_RUN_MS;
+    }
+
+    let run_id_started_ms = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(run_id_started_ms);
+    let Some(started_ms) = run_id_started_ms else {
+        return true;
+    };
+    now_ms.saturating_sub(started_ms) > RUN_RETENTION_GRACE_MS
 }
 
 fn run_version(command: &str, args: &[&str]) -> ToolStatus {
@@ -2668,6 +2712,86 @@ return { ok: true };
         assert!(remaining.contains(&"odw-exec-10000000003-0".to_string()));
         assert!(remaining.contains(&"odw-exec-10000000002-0".to_string())); // protected
         assert!(!remaining.contains(&"odw-exec-10000000000-0".to_string()));
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn prune_runs_skips_active_and_fresh_incomplete_runs() {
+        let runs = temp_root("prune-active-runs");
+        fs::create_dir_all(&runs).unwrap();
+        let now = now_millis() as u64;
+        for i in 0..5 {
+            let run_id = format!("odw-exec-1000000000{i}-0");
+            let run_dir = runs.join(&run_id);
+            fs::create_dir_all(&run_dir).unwrap();
+            let status = if i == 2 { "running" } else { "completed" };
+            let started_ms = if i == 2 { now } else { 1000000000 + i };
+            fs::write(
+                run_dir.join("run.json"),
+                serde_json::to_string_pretty(&json!({
+                    "run_id": run_id,
+                    "status": status,
+                    "started_ms": started_ms
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        prune_runs_keeping(&runs, 2, &[]);
+        let remaining: Vec<String> = sorted_dirs(&runs)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(remaining.len(), 3, "expected 2 newest + 1 active");
+        assert!(remaining.contains(&"odw-exec-10000000004-0".to_string()));
+        assert!(remaining.contains(&"odw-exec-10000000003-0".to_string()));
+        assert!(remaining.contains(&"odw-exec-10000000002-0".to_string())); // active
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn run_dir_prunable_protects_fresh_incomplete_dirs() {
+        let runs = temp_root("prune-fresh-incomplete");
+        fs::create_dir_all(&runs).unwrap();
+        let now = now_millis() as u64;
+        let fresh = runs.join(format!("odw-exec-{now}-0"));
+        let old = runs.join("odw-exec-10000000000-0");
+        fs::create_dir_all(&fresh).unwrap();
+        fs::create_dir_all(&old).unwrap();
+
+        assert!(!run_dir_prunable(&fresh, now));
+        assert!(run_dir_prunable(&old, now));
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn run_dir_prunable_protects_fresh_terminal_dirs() {
+        let runs = temp_root("prune-fresh-terminal");
+        fs::create_dir_all(&runs).unwrap();
+        let now = now_millis() as u64;
+        let fresh = runs.join(format!("odw-exec-{now}-0"));
+        let old = runs.join("odw-exec-10000000000-0");
+        fs::create_dir_all(&fresh).unwrap();
+        fs::create_dir_all(&old).unwrap();
+        let cases = [(&fresh, now, now), (&old, 10000000000, 10000000001)];
+        for (dir, started_ms, finished_ms) in cases {
+            fs::write(
+                dir.join("run.json"),
+                serde_json::to_string_pretty(&json!({
+                    "run_id": dir.file_name().unwrap().to_string_lossy(),
+                    "status": "completed",
+                    "started_ms": started_ms,
+                    "finished_ms": finished_ms
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        assert!(!run_dir_prunable(&fresh, now));
+        assert!(run_dir_prunable(&old, now));
         fs::remove_dir_all(&runs).unwrap();
     }
 

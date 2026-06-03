@@ -139,7 +139,11 @@ if [[ "${1:-}" == "session" ]]; then
       printf '{"run_id":"run_resumed","thread_id":"thread_fake","status":"completed"}\n'
       ;;
     read)
-      printf '{"run_id":"run_fake","status":"completed","current_phase":"completed","last_agent_message":"fake read"}\n'
+      if [[ "${FAKE_CODEX_READ_UNKNOWN:-}" == "1" ]]; then
+        printf '{"ok":false,"error":"unknown run id: run_fake","status":"failed"}\n'
+      else
+        printf '{"run_id":"run_fake","status":"completed","current_phase":"completed","last_agent_message":"fake read"}\n'
+      fi
       ;;
     interrupt)
       printf '{"run_id":"run_fake","status":"interrupted"}\n'
@@ -1091,6 +1095,32 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
     let logs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(logs.get("stdout").is_none());
     assert_eq!(logs["summary"]["last_agent_message"], "fake read");
+
+    let output = Command::new(bin())
+        .env("FAKE_CODEX_READ_UNKNOWN", "1")
+        .args(["codex", "status", "--session", "latest"])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(status["ok"], true);
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["live_read_unavailable"], true);
+    assert_eq!(status["summary"]["last_agent_message"], "implemented");
+
+    let output = Command::new(bin())
+        .env("FAKE_CODEX_READ_UNKNOWN", "1")
+        .args(["codex", "logs", "--session", "latest", "--json"])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let logs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(logs["ok"], true);
+    assert_eq!(logs["state"], "completed");
+    assert_eq!(logs["live_read_unavailable"], true);
+    assert_eq!(logs["summary"]["last_agent_message"], "implemented");
 
     for args in [
         vec!["codex", "status", "--session", "latest"],

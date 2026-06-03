@@ -106,6 +106,12 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
         &output,
         raw.as_ref(),
     );
+    remember_codex_status(
+        &mut record,
+        &codex_state(raw.as_ref()),
+        &codex_output_summary(raw.as_ref()),
+    );
+    session::save(&root, &mut record)?;
     let (ok, state, final_summary, execute_report) = if output.ok || is_needs_input(raw.as_ref()) {
         if let Some(run_id) = record.run_id.as_deref() {
             if is_needs_input(raw.as_ref()) {
@@ -171,6 +177,7 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
             json!(null),
         )
     };
+    remember_codex_status(&mut record, &state, &final_summary);
     session::save(&root, &mut record)?;
 
     // Reap the per-session daemon once the session is terminal. Without this
@@ -285,6 +292,12 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         &output,
         raw.as_ref(),
     );
+    remember_codex_status(
+        &mut record,
+        &codex_state(raw.as_ref()),
+        &codex_output_summary(raw.as_ref()),
+    );
+    session::save(&root, &mut record)?;
     let (ok, state, final_summary, execute_report) = if output.ok || is_needs_input(raw.as_ref()) {
         if is_needs_input(raw.as_ref()) {
             set_pending_input(&mut record, Some("send"), raw.as_ref());
@@ -335,6 +348,7 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
             json!(null),
         )
     };
+    remember_codex_status(&mut record, &state, &final_summary);
     session::save(&root, &mut record)?;
     if session_is_terminal(&record, &state) {
         stop_codex_daemon(&args.bins, &control);
@@ -424,6 +438,7 @@ fn answer(args: AnswerCommandArgs) -> Result<()> {
         set_pending_stage(&mut record, None);
     }
 
+    remember_codex_status(&mut record, &state, &final_summary);
     session::save(&root, &mut record)?;
     if session_is_terminal(&record, &state) {
         stop_codex_daemon(&args.bins, &control);
@@ -450,13 +465,25 @@ fn status(args: SessionCommandArgs) -> Result<()> {
     let command = codex_read_command(&args.bins, &run_id, &control, false);
     let output = run_capture(&command, Some(&root))?;
     let raw = parse_json_or_null(&output.stdout);
+    let read_unavailable = codex_read_unavailable(output.ok, raw.as_ref());
+    let state = if read_unavailable {
+        stored_codex_state(&record)
+    } else {
+        codex_state(raw.as_ref())
+    };
+    let summary = if read_unavailable {
+        stored_codex_summary(&record)
+    } else {
+        codex_output_summary(raw.as_ref())
+    };
     output_json(&json!({
-        "ok": output.ok,
+        "ok": output.ok || read_unavailable,
         "runtime": RUNTIME,
         "action": "status",
         "session": record.session,
-        "state": codex_state(raw.as_ref()),
-        "summary": codex_output_summary(raw.as_ref()),
+        "state": state,
+        "summary": summary,
+        "live_read_unavailable": read_unavailable,
         "output_tail": structured_log_tail(&output.stdout, 80),
         "command": command_summary(output.ok, "status", Some(&record.session), &command, &output, raw.as_ref()),
         "record": record
@@ -472,20 +499,41 @@ fn logs(args: LogsCommandArgs) -> Result<()> {
     let output = run_capture(&command, Some(&root))?;
     if args.json {
         let raw = parse_json_or_null(&output.stdout);
+        let read_unavailable = codex_read_unavailable(output.ok, raw.as_ref());
+        let state = if read_unavailable {
+            stored_codex_state(&record)
+        } else {
+            codex_state(raw.as_ref())
+        };
+        let summary = if read_unavailable {
+            stored_codex_summary(&record)
+        } else {
+            codex_output_summary(raw.as_ref())
+        };
         output_json(&json!({
-            "ok": output.ok,
+            "ok": output.ok || read_unavailable,
             "runtime": RUNTIME,
             "action": "logs",
             "session": record.session,
             "tail": args.tail,
-            "state": codex_state(raw.as_ref()),
-            "summary": codex_output_summary(raw.as_ref()),
-            "output_tail": structured_log_tail(&output.stdout, args.tail),
+            "state": state,
+            "summary": summary,
+            "live_read_unavailable": read_unavailable,
+            "output_tail": if read_unavailable {
+                stored_codex_log_tail(&record, args.tail)
+            } else {
+                structured_log_tail(&output.stdout, args.tail)
+            },
             "command": command_summary(output.ok, "logs", Some(&record.session), &command, &output, raw.as_ref()),
             "record": record
         }))
     } else {
-        println!("{}", tail(&output.stdout, args.tail));
+        let raw = parse_json_or_null(&output.stdout);
+        if codex_read_unavailable(output.ok, raw.as_ref()) {
+            println!("{}", stored_codex_log_tail(&record, args.tail));
+        } else {
+            println!("{}", tail(&output.stdout, args.tail));
+        }
         if !output.stderr.trim().is_empty() {
             eprintln!("{}", tail(&output.stderr, args.tail));
         }
@@ -743,6 +791,96 @@ fn codex_state(raw: Option<&Value>) -> String {
         Some(status) => status.to_string(),
         None => "unknown".to_string(),
     }
+}
+
+fn codex_read_unavailable(command_ok: bool, raw: Option<&Value>) -> bool {
+    if !command_ok {
+        return false;
+    }
+    let Some(raw) = raw else {
+        return false;
+    };
+    if raw.get("ok").and_then(|value| value.as_bool()) != Some(false) {
+        return false;
+    }
+    let text = format!(
+        "{} {}",
+        raw.get("error")
+            .and_then(|value| value.as_str())
+            .unwrap_or(""),
+        raw.get("message")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+    )
+    .to_ascii_lowercase();
+    text.contains("unknown run id")
+}
+
+fn remember_codex_status(record: &mut SessionRecord, state: &str, summary: &Value) {
+    if !record.artifacts.is_object() {
+        record.artifacts = json!({});
+    }
+    if let Some(object) = record.artifacts.as_object_mut() {
+        object.insert("last_state".to_string(), json!(state));
+        object.insert("last_summary".to_string(), summary.clone());
+    }
+}
+
+fn stored_codex_state(record: &SessionRecord) -> String {
+    record
+        .artifacts
+        .get("last_state")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            if pending_stage(record).is_some() {
+                "waiting_for_user".to_string()
+            } else {
+                "completed".to_string()
+            }
+        })
+}
+
+fn stored_codex_summary(record: &SessionRecord) -> Value {
+    record
+        .artifacts
+        .get("last_summary")
+        .cloned()
+        .filter(|value| !value.is_null())
+        .unwrap_or_else(|| {
+            json!({
+                "ok": true,
+                "status": stored_codex_state(record),
+                "current_phase": stored_codex_state(record),
+                "run_id": record.run_id,
+                "thread_id": record.thread_id,
+                "thread_path": record.thread_path,
+                "log_path": stored_codex_log_path(record).map(|path| path.to_string_lossy().to_string()),
+                "last_agent_message": null,
+                "counts": null,
+                "usage": null,
+                "errors": null,
+                "warnings": null
+            })
+        })
+}
+
+fn stored_codex_log_path(record: &SessionRecord) -> Option<PathBuf> {
+    record
+        .artifacts
+        .get("log_dir")
+        .and_then(|value| value.as_str())
+        .map(PathBuf::from)
+        .map(|dir| dir.join("latest.jsonl"))
+}
+
+fn stored_codex_log_tail(record: &SessionRecord, lines: usize) -> String {
+    let Some(path) = stored_codex_log_path(record) else {
+        return String::new();
+    };
+    fs::read_to_string(path)
+        .map(|text| tail(&text, lines))
+        .unwrap_or_default()
 }
 
 fn codex_status(raw: Option<&Value>) -> Option<&str> {

@@ -872,6 +872,7 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
             .rev()
             .find(|event| json_string(event, "type").as_deref() == Some("workflow_error"))
             .and_then(|event| json_string(event, "message"))
+            .or_else(|| progress.get("result").and_then(format_result_failure_cause))
             .or_else(|| json_string(&run["error"], "message"))
             .or_else(|| json_string(run, "error"));
         if let Some(cause) = cause {
@@ -950,6 +951,30 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
     }
 
     lines.join("\n")
+}
+
+fn format_result_failure_cause(result: &serde_json::Value) -> Option<String> {
+    if result.get("ok").and_then(|value| value.as_bool()) != Some(false) {
+        return None;
+    }
+    let error = result.get("error")?;
+    if let Some(message) = error
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(message.to_string());
+    }
+    let category = json_string(error, "category");
+    let message = json_string(error, "message");
+    match (category, message) {
+        (Some(category), Some(message)) if !message.trim().is_empty() => {
+            Some(format!("{category}: {}", message.trim()))
+        }
+        (Some(category), _) if !category.trim().is_empty() => Some(category.trim().to_string()),
+        (_, Some(message)) if !message.trim().is_empty() => Some(message.trim().to_string()),
+        _ => None,
+    }
 }
 
 fn format_workflow_history_for_runs_show(history: &[serde_json::Value]) -> Vec<String> {
@@ -2754,6 +2779,69 @@ mod tests {
         );
         assert!(view.contains("[exit] status=completed"));
         assert!(!view.contains("long evidence that should stay out"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_journals_show_failed_result_cause() {
+        let root = temp_root("run-journal-failure-cause");
+        let run_dir = root.join(".odw/runs/odw-run-failed");
+        fs::create_dir_all(&run_dir).unwrap();
+        let record = json!({
+            "run_id": "odw-run-failed",
+            "status": "failed",
+            "run_dir": run_dir,
+            "started_ms": 1000_u64,
+            "finished_ms": 1500_u64
+        });
+        fs::write(
+            root.join(".odw/runs/latest.json"),
+            serde_json::to_string_pretty(&record).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("run.json"),
+            serde_json::to_string_pretty(&record).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("events.jsonl"),
+            [
+                r#"{"type":"workflow_done","name":"test-flow","result":{"ok":false,"error":{"category":"planning_failed","message":"Planner did not return tasks"}}}"#,
+                r#"{"type":"exit","status":"failed"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("state.json"),
+            serde_json::to_string_pretty(&json!({
+                "result": {
+                    "ok": false,
+                    "error": {
+                        "category": "planning_failed",
+                        "message": "Planner did not return tasks"
+                    }
+                },
+                "activeAgents": {},
+                "agents": {},
+                "failedAgents": {},
+                "checkpoints": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let shown = runs_show_report(&root, "latest", 5).unwrap();
+        let view = format_runs_show_view(&shown);
+        assert!(view.contains("Failure: planning_failed: Planner did not return tasks"));
+        assert_eq!(
+            format_result_failure_cause(
+                &json!({"ok": false, "error": "no captured worktree changes"})
+            ),
+            Some("no captured worktree changes".to_string())
+        );
 
         fs::remove_dir_all(root).unwrap();
     }

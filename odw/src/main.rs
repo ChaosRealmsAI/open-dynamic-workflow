@@ -127,6 +127,10 @@ struct ExecArgs {
     model: Option<String>,
     #[arg(long, default_value = "low")]
     effort: String,
+    /// Per-node timeout in seconds. Bounds the executor's agent loop, checked
+    /// between steps — not a hard mid-call kill, so a single in-flight model call
+    /// can overrun it (each runtime caps individual calls separately). codex nodes
+    /// floor this at 600s so real coding isn't truncated.
     #[arg(long, default_value = "120")]
     timeout: String,
     #[arg(long, env = "ODW_CODEXCTL_BIN", default_value = "codexctl")]

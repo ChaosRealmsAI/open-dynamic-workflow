@@ -34,6 +34,33 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
+#[test]
+fn run_help_explains_common_task_options() {
+    let output = Command::new(bin())
+        .args(["run", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "Inline task text",
+        "Read task text from a file",
+        "Workspace directory",
+        "Runtime to use",
+        "Print machine-readable JSON",
+        "Wait timeout in milliseconds",
+    ] {
+        assert!(
+            help.contains(expected),
+            "missing help text {expected}: {help}"
+        );
+    }
+}
+
 fn write_exe(path: &Path, content: &str) {
     fs::write(path, content).unwrap();
     let mut perms = fs::metadata(path).unwrap().permissions();

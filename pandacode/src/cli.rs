@@ -126,9 +126,13 @@ pub struct ClaudeHookArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct AnswerCommandArgs {
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
     #[arg(
         long,
@@ -145,9 +149,9 @@ pub struct AnswerCommandArgs {
     pub text: Option<String>,
     #[arg(long, help = "Wait for the runtime to continue after answering")]
     pub wait: bool,
-    #[arg(long)]
+    #[arg(long, help = "Wait timeout in milliseconds")]
     pub timeout_ms: Option<u64>,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -155,9 +159,13 @@ pub struct AnswerCommandArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct GlobalArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -165,9 +173,13 @@ pub struct GlobalArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct RuntimeGlobalArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -177,7 +189,12 @@ pub struct RuntimeGlobalArgs {
 pub struct AgentTaskCommandArgs {
     #[command(flatten)]
     pub common: TaskCommandArgs,
-    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = RuntimeSelector::Auto,
+        help = "Runtime to use; auto selects from model/provider hints"
+    )]
     pub runtime: RuntimeSelector,
     #[arg(
         long,
@@ -190,7 +207,7 @@ pub struct AgentTaskCommandArgs {
 pub struct AgentSessionCommandArgs {
     #[command(flatten)]
     pub common: SessionCommandArgs,
-    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto)]
+    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto, help = "Runtime to inspect")]
     pub runtime: RuntimeSelector,
 }
 
@@ -198,7 +215,7 @@ pub struct AgentSessionCommandArgs {
 pub struct AgentLogsCommandArgs {
     #[command(flatten)]
     pub common: LogsCommandArgs,
-    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto)]
+    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto, help = "Runtime to inspect")]
     pub runtime: RuntimeSelector,
 }
 
@@ -206,7 +223,7 @@ pub struct AgentLogsCommandArgs {
 pub struct AgentAnswerCommandArgs {
     #[command(flatten)]
     pub common: AnswerCommandArgs,
-    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto)]
+    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto, help = "Runtime to answer")]
     pub runtime: RuntimeSelector,
 }
 
@@ -217,17 +234,17 @@ pub struct TaskCommandArgs {
         help = "Read task from stdin when this positional is '-'"
     )]
     pub stdin: Option<String>,
-    #[arg(long, conflicts_with = "task_file")]
+    #[arg(long, conflicts_with = "task_file", help = "Inline task text")]
     pub task: Option<String>,
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", help = "Read task text from a file")]
     pub task_file: Option<PathBuf>,
-    #[arg(long, default_value = ".")]
+    #[arg(long, default_value = ".", help = "Workspace directory")]
     pub cd: PathBuf,
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long)]
+    #[arg(long, help = "Model id for this turn")]
     pub model: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Reasoning/effort level when supported")]
     pub effort: Option<Effort>,
     #[arg(
         long,
@@ -235,9 +252,9 @@ pub struct TaskCommandArgs {
         help = "Agent permission mode. New sessions default to max; resume inherits the stored mode unless set"
     )]
     pub permission: Option<PermissionMode>,
-    #[arg(long)]
+    #[arg(long, help = "Wait timeout in milliseconds")]
     pub timeout_ms: Option<u64>,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -257,11 +274,15 @@ pub struct BambooTaskCommandArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct SessionCommandArgs {
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -269,11 +290,15 @@ pub struct SessionCommandArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct LogsCommandArgs {
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100, help = "Number of log lines to show")]
     pub tail: usize,
     #[arg(
         long,
@@ -281,7 +306,7 @@ pub struct LogsCommandArgs {
         help = "Claude only: capture the final visible viewport instead of scrollback tail"
     )]
     pub visible: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -289,15 +314,24 @@ pub struct LogsCommandArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct ModelCommandArgs {
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long = "model", alias = "set", value_name = "MODEL")]
+    #[arg(
+        long = "model",
+        alias = "set",
+        value_name = "MODEL",
+        help = "Model id for the next turn"
+    )]
     pub model: String,
-    #[arg(long)]
+    #[arg(long, help = "Reasoning/effort level for the next turn when supported")]
     pub effort: Option<Effort>,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,

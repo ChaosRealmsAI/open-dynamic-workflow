@@ -149,7 +149,9 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
             &marker,
         );
         let last_agent_message = strip_completion_marker(
-            wait.get("last_agent_message").cloned().unwrap_or(Value::Null),
+            wait.get("last_agent_message")
+                .cloned()
+                .unwrap_or(Value::Null),
             &marker,
         );
         Ok(json!({
@@ -288,7 +290,9 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         &marker,
     );
     let last_agent_message = strip_completion_marker(
-        wait.get("last_agent_message").cloned().unwrap_or(Value::Null),
+        wait.get("last_agent_message")
+            .cloned()
+            .unwrap_or(Value::Null),
         &marker,
     );
     let report = json!({
@@ -924,7 +928,9 @@ fn claude_usage_from_transcript(transcript_path: &str) -> Option<Value> {
         if role != Some("assistant") {
             continue;
         }
-        let Some(usage) = message.and_then(|m| m.get("usage")).or_else(|| event.get("usage"))
+        let Some(usage) = message
+            .and_then(|m| m.get("usage"))
+            .or_else(|| event.get("usage"))
         else {
             continue;
         };
@@ -1526,8 +1532,10 @@ mod tests {
 
     #[test]
     fn claude_usage_sums_assistant_transcript_tokens() {
-        let dir = std::env::temp_dir()
-            .join(format!("pandacode-claude-usage-{}", crate::io::now_millis()));
+        let dir = std::env::temp_dir().join(format!(
+            "pandacode-claude-usage-{}",
+            crate::io::now_millis()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("transcript.jsonl");
         std::fs::write(

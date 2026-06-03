@@ -54,7 +54,10 @@ pub fn save(root: &Path, record: &mut SessionRecord) -> Result<()> {
     let dir = runtime_dir(root, &record.runtime);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = record_path(root, &record.runtime, &record.session);
-    write_atomic(&path, &format!("{}\n", serde_json::to_string_pretty(record)?))?;
+    write_atomic(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(record)?),
+    )?;
     let pointer = format!(
         "{}\n",
         serde_json::to_string_pretty(&json!({
@@ -261,6 +264,9 @@ mod tests {
         assert!(p.starts_with(&dir), "escaped runtime dir: {}", p.display());
         assert!(!p.to_string_lossy().contains("/etc/passwd"));
         // A normal session still maps to <session>.json under the runtime dir.
-        assert_eq!(record_path(root, "claude", "abc-1.2"), dir.join("abc-1.2.json"));
+        assert_eq!(
+            record_path(root, "claude", "abc-1.2"),
+            dir.join("abc-1.2.json")
+        );
     }
 }

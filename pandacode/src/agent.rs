@@ -10602,7 +10602,8 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn resolve_writable_path_blocks_symlink_escape_with_create_dirs() {
-        let base = std::env::temp_dir().join(format!("pandacode-wpath-{}", crate::io::now_millis()));
+        let base =
+            std::env::temp_dir().join(format!("pandacode-wpath-{}", crate::io::now_millis()));
         let cwd = base.join("cwd");
         let outside = base.join("outside");
         std::fs::create_dir_all(&cwd).unwrap();

@@ -273,7 +273,6 @@ fn reject_provider_for_delegated_runtime(provider: Option<&str>, _runtime: &str)
     Ok(())
 }
 
-
 pub async fn doctor(args: GlobalArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
     let codex = codex::doctor_report(&root, &args.bins)?;

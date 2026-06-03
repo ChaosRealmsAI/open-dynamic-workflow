@@ -252,6 +252,46 @@ return { ok: landed.ok && landed.applied === 2 && landed.failed === 0 };`, { cwd
   }
 });
 
+test("worktree: combined patches preserve trailing blank context lines", () => {
+  const { dir, git } = makeGitRepo("odw-combined-blank-context-");
+  try {
+    writeFileSync(join(dir, "a.md"), "alpha\n\n");
+    git(["add", "a.md"]);
+    git(["commit", "-q", "-m", "blank-context-base"]);
+    const blankContextDiff = `diff --git a/a.md b/a.md
+--- a/a.md
++++ b/a.md
+@@ -1,2 +1,2 @@
+-alpha
++alpha updated
+${" "}
+`;
+    const newFileDiff = `diff --git a/b.md b/b.md
+new file mode 100644
+--- /dev/null
++++ b/b.md
+@@ -0,0 +1 @@
++bravo
+`;
+    const r = run(`export const meta={name:"wblankctx"};
+phase("P","");
+const candidates = [
+  { changed:true, files:["a.md"], diff:${JSON.stringify(blankContextDiff)} },
+  { changed:true, files:["b.md"], diff:${JSON.stringify(newFileDiff)} }
+];
+const gate = await reviewWorktreeDiffs(candidates, { label:"blank-context", reviewerCount:1 });
+const landed = gate.applyReady ? applyWorktreeDiffs(candidates, { label:"blank-context" }) : { ok:false, applied:0 };
+log("BLANKCTX gate="+gate.decision+" applyReady="+gate.applyReady+" landed="+landed.ok+" applied="+landed.applied);
+return { ok: gate.decision === "approve" && gate.applyReady === true && landed.ok === true && landed.applied === 2 };`, { cwd: dir });
+    assert(r.code === 0, `blank context workflow failed: ${r.out.slice(-700)}`);
+    assert(/BLANKCTX gate=approve applyReady=true landed=true applied=2/.test(r.out), `blank context summary wrong: ${r.out.slice(-700)}`);
+    assert(readFileSync(join(dir, "a.md"), "utf8") === "alpha updated\n\n", "blank-context patch did not update a.md");
+    assert(readFileSync(join(dir, "b.md"), "utf8") === "bravo\n", "blank-context patch did not create b.md");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("worktree: patch conflict is structured and leaves cwd untouched", () => {
   const { dir, git } = makeGitRepo("odw-apply-conflict-");
   try {

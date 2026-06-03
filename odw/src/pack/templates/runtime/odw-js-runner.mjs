@@ -1300,6 +1300,14 @@ globalThis.captureMainWorktreeSnapshot = (options = {}) => captureMainWorktreeSn
 globalThis.assertMainWorktreeUnchanged = (snapshot, options = {}) => assertMainWorktreeUnchanged(snapshot, options);
 globalThis.restoreMainWorktreeSnapshot = (snapshot, check, options = {}) => restoreMainWorktreeSnapshot(snapshot, check, options);
 
+function combinePatchTexts(entries) {
+  return entries
+    .map((entry) => String(entry.diff || ""))
+    .filter((diff) => diff.trim())
+    .map((diff) => diff.endsWith("\n") ? diff : `${diff}\n`)
+    .join("");
+}
+
 const mockReviewRejectOnce = new Map();
 
 const WORKTREE_REVIEW_SCHEMA = {
@@ -1493,7 +1501,7 @@ function applyCapturedWorktreeDiffsAtomic(candidates, options = {}) {
     return worktreePatchBatchResult(results);
   }
 
-  const combinedDiff = `${changed.map((entry) => entry.diff.trimEnd()).join("\n\n")}\n`;
+  const combinedDiff = combinePatchTexts(changed);
   const check = runGitApply(["apply", "--check", "--whitespace=nowarn"], combinedDiff);
   if (!check.ok) {
     const results = prepared.map((entry) => entry.result || {
@@ -1730,7 +1738,7 @@ async function reviewCapturedWorktreeDiffs(candidates, options = {}) {
 }
 
 function combinedWorktreeDiff(entries) {
-  return `${entries.map((entry) => String(entry.diff || "").trimEnd()).filter(Boolean).join("\n\n")}\n`;
+  return combinePatchTexts(entries);
 }
 
 function normalizeWorktreeReviewers(options = {}) {

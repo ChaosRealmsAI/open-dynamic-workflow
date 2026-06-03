@@ -80,7 +80,8 @@ return { ok: verdict.passed === true, verdict };
   tokens, not output-only — size budgets accordingly.)
 - `workflow(nameOrRef, args)` — run a saved/sibling workflow inline (1 level deep).
 - `phase(title)`, `log(msg)`, `checkpoint(name, value?)`, `promptSlot(...)`.
-- `args` / `input` (the `--input` payload), `odw` (run metadata), `pandacode`
+- `args` / `input` (the `--input` payload), `odw` (run metadata:
+  `{ backend, runId, runDir, statePath, resumeFrom }`), `pandacode`
   (`.codex(prompt)` / `.claude(prompt)` / `.bamboo(prompt, { provider })` /
   `.exec(runtime, prompt)`).
 
@@ -144,6 +145,14 @@ odw exec --script wf.js --backend pandacode --json
   **object**. Schema validation retries only if you set `retry`/`maxAttempts`
   (default is one attempt — unlike the built-in tool, which auto-retries). An
   unloadable schema path fails fast with `schema_load_error`.
+- **Mock dry runs differ from real:** `--backend mock` has no executor, so a
+  no-schema node returns a small *status object* (NOT final text), and a `schema`
+  node always "fails" (mock can't synthesize your JSON, so the run exits non-zero
+  by design). So in a dry run, coerce results defensively
+  (`typeof x === "string" ? x : x.text ?? JSON.stringify(x)`) and don't gate on a
+  schema node passing. A real `--backend pandacode` run returns the final text /
+  validated object as described above. Use mock to prove the *graph shape*
+  (parallel/pipeline/phases), not node outputs.
 - **Failure is data:** a node that exhausts retries returns
   `{ ok:false, error:{ category, ... } }` — it does **not** throw, so it stays
   truthy and `.filter(Boolean)` keeps it. Drop failed nodes with

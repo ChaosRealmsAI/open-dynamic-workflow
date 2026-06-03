@@ -51,6 +51,7 @@ export default async function workflow() {
   const maxReviewRounds = Math.max(1, Math.min(4, Number(args?.maxReviewRounds || defaultReviewRounds)));
   const strictTaskFileBoundaries = args?.strictTaskFileBoundaries !== false;
   const allowDirtyTaskFiles = args?.allowDirtyTaskFiles === true;
+  const allowDuplicateTaskFiles = args?.allowDuplicateTaskFiles === true;
   const taskBrief = TASKS.map(
     (task) => `- ${task.id}: ${task.file || "(files from prompt)"} — ${task.prompt}`
   ).join("\n");
@@ -96,10 +97,36 @@ Constraints:
   };
 
   const fileOwner = new Map();
+  const fileOwners = new Map();
   for (const task of TASKS) {
     for (const file of taskFiles(task)) {
-      fileOwner.set(file, task);
+      if (!fileOwner.has(file)) {
+        fileOwner.set(file, task);
+      }
+      const owners = fileOwners.get(file) || [];
+      owners.push(task);
+      fileOwners.set(file, owners);
     }
+  }
+
+  const duplicateTaskFiles = [...fileOwners.entries()]
+    .filter(([, owners]) => owners.length > 1)
+    .map(([file, owners]) => ({
+      file,
+      tasks: owners.map((task) => task.id),
+    }));
+  if (!allowDuplicateTaskFiles && duplicateTaskFiles.length > 0) {
+    return {
+      ok: false,
+      error: {
+        category: "duplicate_task_files",
+        message:
+          "Multiple parallel tasks declare the same file. This starter expects independently owned task files.",
+      },
+      duplicateTaskFiles,
+      hint:
+        "Merge those tasks, run them serially, or pass allowDuplicateTaskFiles:true only when overlapping patches are intentional and reviewable.",
+    };
   }
 
   const startSnapshot = captureMainWorktreeSnapshot({ label: "starter-preflight" });

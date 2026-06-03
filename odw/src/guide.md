@@ -165,6 +165,9 @@ odw exec --script wf.js --backend pandacode --json
   when declared task files already have uncommitted changes; commit/stash them
   first, or pass `allowDirtyTaskFiles:true` only when the owner accepts that
   workers will not see those dirty changes.
+  It also blocks duplicate declared ownership of the same file; merge those
+  tasks, run them serially, or pass `allowDuplicateTaskFiles:true` only when
+  overlapping patches are intentional and reviewable.
 - The workflow's `return` value is printed as `[result] <json>` (or the sole
   output under `--json`). Returning `{ ok:false, ... }` makes `odw exec` exit
   non-zero — usable as a CI/script gate.

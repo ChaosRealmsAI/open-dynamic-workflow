@@ -44,5 +44,8 @@ Because isolated worktrees branch from `HEAD`, it also blocks dirty declared
 task files before implementation; commit/stash them first, or set
 `allowDirtyTaskFiles:true` only when the owner accepts that workers will not see
 those uncommitted changes.
+It also blocks duplicate declared ownership of the same file; merge those tasks,
+run them serially, or set `allowDuplicateTaskFiles:true` only when overlapping
+patches are intentional and reviewable.
 
 See `odw guide` for the full authoring guide and `odw spec` for the typed API.

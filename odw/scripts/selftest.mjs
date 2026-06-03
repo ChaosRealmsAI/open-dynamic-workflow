@@ -1399,6 +1399,31 @@ test("examples: parallel-review-apply blocks dirty task files before isolated wo
   }
 });
 
+test("examples: parallel-review-apply blocks duplicate task file ownership before worktrees", () => {
+  const { dir } = makeGitRepo("odw-example-07-duplicate-file-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('duplicate task guard')\"",
+      tasks: [
+        { id: "api-impl", file: "src/api.js", prompt: "Create src/api.js implementation." },
+        { id: "api-tests", file: "src/api.js", prompt: "Add src/api.js inline tests." }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code !== 0, "starter should fail before worktrees when task file ownership is duplicated");
+    const result = r.state.result;
+    assert(result?.error?.category === "duplicate_task_files", `wrong duplicate-file error: ${JSON.stringify(result?.error)}`);
+    assert(result?.duplicateTaskFiles?.[0]?.file === "src/api.js", `duplicate file not reported: ${JSON.stringify(result)}`);
+    assert(result?.duplicateTaskFiles?.[0]?.tasks?.join("|") === "api-impl|api-tests", `duplicate owners not reported: ${JSON.stringify(result)}`);
+    assert(ev(r.events, "worktree_start").length === 0, "duplicate guard should not create implementation worktrees");
+    assert(ev(r.events, "worktree_review_gate").length === 0, "duplicate guard should not run review gate");
+    assert(ev(r.events, "worktree_patch_apply").length === 0, "duplicate guard should not apply patches");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply fails if final verification mutates cwd", () => {
   const { dir } = makeGitRepo("odw-example-07-verify-guard-");
   try {
@@ -1435,6 +1460,7 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
   assert(/history/.test(starter.out) && /repair_plan/.test(starter.out), "starter output missing review/repair history");
   assert(/pre_review_block/.test(starter.out) && /strictTaskFileBoundaries/.test(starter.out), "starter output missing pre-review implementation gate");
   assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
+  assert(/duplicate_task_files/.test(starter.out) && /allowDuplicateTaskFiles/.test(starter.out), "starter output missing duplicate task-file guard");
   assert(/captureMainWorktreeSnapshot/.test(starter.out) && /permission: "limited"/.test(starter.out), "starter output missing read-only final verification guard");
   const { dir } = makeGitRepo("odw-starter-cli-");
   try {

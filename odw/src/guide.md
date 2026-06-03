@@ -164,8 +164,11 @@ odw exec --script wf.js --backend pandacode --json
   cross-owned file edits are repaired before any review/apply gate runs. Use a
   separate planning step for exploratory work, or pass
   `allowUndeclaredTaskFiles:true` only when the owner explicitly accepts weaker
-  ownership checks. Set `strictTaskFileBoundaries:false` only when the owner
-  explicitly wants cross-file task overlap.
+  ownership checks. Declared files must be normalized repo-relative paths outside
+  `.git`, `.odw`, `.pandacode`, and `node_modules`; ODW rejects absolute paths,
+  backslashes, and `..` escapes before creating worktrees. Set
+  `strictTaskFileBoundaries:false` only when the owner explicitly wants
+  cross-file task overlap.
   Because isolated worktrees branch from `HEAD`, the starter also refuses to run
   when declared task files already have uncommitted changes; commit/stash them
   first, or pass `allowDirtyTaskFiles:true` only when the owner accepts that

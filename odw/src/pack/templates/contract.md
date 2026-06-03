@@ -24,8 +24,10 @@ sessions, repair history, and reports.
 Before review, it blocks failed implementation nodes and cross-owned file edits.
 Use `task.file` or `task.files` to declare each task's ownership. Use a separate
 planning step for exploratory work, or set `allowUndeclaredTaskFiles:true` only
-when the owner accepts weaker ownership checks. Set
-`strictTaskFileBoundaries:false` only with explicit owner intent.
+when the owner accepts weaker ownership checks. Declared files must be normalized
+repo-relative paths outside `.git`, `.odw`, `.pandacode`, and `node_modules`;
+absolute paths, backslashes, and `..` escapes are rejected before worktrees are
+created. Set `strictTaskFileBoundaries:false` only with explicit owner intent.
 Because isolated worktrees branch from `HEAD`, it also blocks dirty declared
 task files before implementation; commit/stash them first, or set
 `allowDirtyTaskFiles:true` only when the owner accepts that workers will not see

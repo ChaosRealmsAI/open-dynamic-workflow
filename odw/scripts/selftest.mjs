@@ -1406,7 +1406,7 @@ test("examples: parallel-review-apply blocks duplicate task file ownership befor
     const input = {
       test: "node -e \"console.log('duplicate task guard')\"",
       tasks: [
-        { id: "api-impl", file: "src/api.js", prompt: "Create src/api.js implementation." },
+        { id: "api-impl", file: "src/./api.js", prompt: "Create src/api.js implementation." },
         { id: "api-tests", file: "src/api.js", prompt: "Add src/api.js inline tests." }
       ]
     };
@@ -1419,6 +1419,54 @@ test("examples: parallel-review-apply blocks duplicate task file ownership befor
     assert(ev(r.events, "worktree_start").length === 0, "duplicate guard should not create implementation worktrees");
     assert(ev(r.events, "worktree_review_gate").length === 0, "duplicate guard should not run review gate");
     assert(ev(r.events, "worktree_patch_apply").length === 0, "duplicate guard should not apply patches");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("examples: parallel-review-apply normalizes declared task file paths", () => {
+  const { dir } = makeGitRepo("odw-example-07-normalized-file-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('normalized task file verify ok')\"",
+      tasks: [
+        { id: "normalized", file: "docs/./normalized.md", prompt: "Create docs/normalized.md." }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `starter should normalize safe relative task file paths: ${r.out.slice(-900)}`);
+    assert(existsSync(join(dir, "docs/normalized.md")), "normalized declared file did not land at normalized path");
+    const result = r.state.result;
+    assert(result?.landed?.applied === 1, `normalized file was not applied: ${JSON.stringify(result?.landed)}`);
+    assert(!result.history?.some((item) => item.step === "pre_review_block"), `normalized file caused scope block: ${JSON.stringify(result.history)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("examples: parallel-review-apply blocks unsafe task file paths before worktrees", () => {
+  const { dir } = makeGitRepo("odw-example-07-invalid-file-paths-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('invalid path guard')\"",
+      tasks: [
+        { id: "escape", file: "../outside.md", prompt: "Write outside the repo." },
+        { id: "internal", files: [".odw/internal.md", "src\\windows.js"], prompt: "Write internal/generated paths." }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code !== 0, "starter should fail before worktrees when task file paths are unsafe");
+    const result = r.state.result;
+    assert(result?.error?.category === "invalid_task_files", `wrong invalid-file error: ${JSON.stringify(result?.error)}`);
+    const errors = Object.fromEntries((result?.invalidTaskFiles || []).map((item) => [item.file, item.error]));
+    assert(errors["../outside.md"] === "path_escape", `path escape not reported: ${JSON.stringify(result)}`);
+    assert(errors[".odw/internal.md"] === "reserved_path", `reserved path not reported: ${JSON.stringify(result)}`);
+    assert(errors["src\\windows.js"] === "backslash_path", `backslash path not reported: ${JSON.stringify(result)}`);
+    assert(ev(r.events, "worktree_start").length === 0, "invalid-file guard should not create implementation worktrees");
+    assert(ev(r.events, "worktree_review_gate").length === 0, "invalid-file guard should not run review gate");
+    assert(ev(r.events, "worktree_patch_apply").length === 0, "invalid-file guard should not apply patches");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1523,6 +1571,7 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
   assert(/history/.test(starter.out) && /repair_plan/.test(starter.out), "starter output missing review/repair history");
   assert(/pre_review_block/.test(starter.out) && /strictTaskFileBoundaries/.test(starter.out), "starter output missing pre-review implementation gate");
   assert(/invalid_task_ids/.test(starter.out) && /stable unique id/.test(starter.out), "starter output missing task id guard");
+  assert(/invalid_task_files/.test(starter.out) && /repo-relative paths/.test(starter.out), "starter output missing invalid task-file path guard");
   assert(/undeclared_task_files/.test(starter.out) && /allowUndeclaredTaskFiles/.test(starter.out), "starter output missing undeclared task-file guard");
   assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
   assert(/duplicate_task_files/.test(starter.out) && /allowDuplicateTaskFiles/.test(starter.out), "starter output missing duplicate task-file guard");

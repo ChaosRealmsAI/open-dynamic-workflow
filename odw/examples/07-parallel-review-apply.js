@@ -92,8 +92,87 @@ export default async function workflow() {
     };
   }
 
+  const declaredTaskFileValues = (task) => {
+    const values = [];
+    if (Object.prototype.hasOwnProperty.call(task || {}, "file")) {
+      values.push(task.file);
+    }
+    if (Array.isArray(task?.files)) {
+      values.push(...task.files);
+    }
+    return values;
+  };
+
+  const normalizeTaskFile = (value) => {
+    const raw = String(value ?? "").trim();
+    if (!raw) {
+      return { raw, path: null, error: "empty_path" };
+    }
+    if (raw.includes("\0")) {
+      return { raw, path: null, error: "nul_byte" };
+    }
+    if (raw.startsWith("/") || raw.startsWith("\\") || /^[A-Za-z]:[\\/]/.test(raw)) {
+      return { raw, path: null, error: "absolute_path" };
+    }
+    if (raw.includes("\\")) {
+      return { raw, path: null, error: "backslash_path" };
+    }
+    const parts = raw.split("/").filter((part) => part && part !== ".");
+    if (parts.length === 0) {
+      return { raw, path: null, error: "empty_path" };
+    }
+    if (parts.some((part) => part === "..")) {
+      return { raw, path: null, error: "path_escape" };
+    }
+    const blocked = parts.find((part) => [".git", ".odw", ".pandacode", "node_modules"].includes(part));
+    if (blocked) {
+      return { raw, path: null, error: "reserved_path", segment: blocked };
+    }
+    return { raw, path: parts.join("/"), error: null };
+  };
+
+  const declaredTaskFileEntries = (task, index) =>
+    declaredTaskFileValues(task).map((value) => ({
+      ...normalizeTaskFile(value),
+      task: task.id,
+      index,
+    }));
+
+  const declaredFilesByTask = new Map(
+    TASKS.map((task, index) => [task.id, declaredTaskFileEntries(task, index)])
+  );
+
+  const taskFiles = (task) =>
+    [...new Set((declaredFilesByTask.get(task.id) || [])
+      .filter((entry) => !entry.error && entry.path)
+      .map((entry) => entry.path))];
+
+  const invalidTaskFiles = [...declaredFilesByTask.values()]
+    .flat()
+    .filter((entry) => entry.error)
+    .map((entry) => ({
+      task: entry.task,
+      index: entry.index,
+      file: entry.raw,
+      error: entry.error,
+      segment: entry.segment || null,
+    }));
+  if (invalidTaskFiles.length > 0) {
+    return {
+      ok: false,
+      error: {
+        category: "invalid_task_files",
+        message:
+          "Declared task files must be normalized repo-relative paths outside ODW/PandaCode/internal generated directories.",
+      },
+      invalidTaskFiles,
+      hint:
+        "Use POSIX-style repo-relative paths like src/api.ts. Do not use absolute paths, '..', backslashes, .git, .odw, .pandacode, or node_modules.",
+    };
+  }
+
   const taskBrief = TASKS.map(
-    (task) => `- ${task.id}: ${task.file || "(files from prompt)"} — ${task.prompt}`
+    (task) => `- ${task.id}: ${taskFiles(task).join(", ") || "(files from prompt)"} — ${task.prompt}`
   ).join("\n");
   const runContext =
     args?.context ||
@@ -124,17 +203,6 @@ Constraints:
 - Do not claim defaults or generated files that are not directly true from the task context or project evidence.
 - Run this verification if relevant: ${task.verify || TEST}
 - Final response: one concise sentence with changed files and verification result.`;
-
-  const taskFiles = (task) => {
-    const files = [];
-    if (task?.file) {
-      files.push(task.file);
-    }
-    if (Array.isArray(task?.files)) {
-      files.push(...task.files.filter(Boolean));
-    }
-    return [...new Set(files)];
-  };
 
   const undeclaredTaskFiles = TASKS
     .map((task, index) => ({

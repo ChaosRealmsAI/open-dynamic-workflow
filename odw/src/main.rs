@@ -929,6 +929,14 @@ fn exec_script(args: ExecArgs) -> Result<()> {
         .map(|run_dir| run_dir.join("state.json"))
         .filter(|path| path.exists());
     fs::create_dir_all(&run_dir).with_context(|| format!("create {}", run_dir.display()))?;
+    // Retention: .odw/runs is otherwise unbounded (dogfooding accumulated 4882
+    // run dirs). Keep the most recent ODW_RUNS_KEEP runs (default 50; 0 disables).
+    // Best-effort; never prunes this run's own dir or the one we are resuming.
+    let mut protected_runs: Vec<&Path> = vec![run_dir.as_path()];
+    if let Some(resume_dir) = resume_run_dir.as_deref() {
+        protected_runs.push(resume_dir);
+    }
+    prune_old_runs(&root.join(".odw/runs"), &protected_runs);
     fs::write(run_dir.join("input.raw"), &input)
         .with_context(|| format!("write {}", run_dir.join("input.raw").display()))?;
     fs::write(&runner, ODW_JS_RUNNER).with_context(|| format!("write {}", runner.display()))?;
@@ -1844,6 +1852,42 @@ fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(dirs)
 }
 
+/// Keep only the most recent `ODW_RUNS_KEEP` run dirs under `.odw/runs` (default
+/// 50; 0 disables). Run dirs are named `odw-exec-<epoch_ms>-<n>`, so the lexical
+/// order from `sorted_dirs` is chronological — the oldest are deleted first.
+/// Best-effort: any failure is ignored so retention never breaks a run.
+fn prune_old_runs(runs_dir: &Path, protect: &[&Path]) {
+    let keep = std::env::var("ODW_RUNS_KEEP")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(50);
+    prune_runs_keeping(runs_dir, keep, protect);
+}
+
+fn prune_runs_keeping(runs_dir: &Path, keep: usize, protect: &[&Path]) {
+    if keep == 0 {
+        return;
+    }
+    let dirs = match sorted_dirs(runs_dir) {
+        Ok(dirs) => dirs,
+        Err(_) => return,
+    };
+    if dirs.len() <= keep {
+        return;
+    }
+    // Protected dirs (the run we just created + the run being resumed) are never
+    // pruned, so a concurrent `odw exec` in the same repo cannot delete this
+    // run's in-progress dir out from under it.
+    let protected: Vec<_> = protect.iter().filter_map(|path| path.file_name()).collect();
+    let remove_count = dirs.len() - keep;
+    for dir in dirs.into_iter().take(remove_count) {
+        if dir.file_name().is_some_and(|name| protected.contains(&name)) {
+            continue;
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 fn run_version(command: &str, args: &[&str]) -> ToolStatus {
     match Command::new(command).args(args).output() {
         Ok(output) => {
@@ -2232,6 +2276,30 @@ return { ok: true };
         assert!(result.is_err());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prune_runs_keeps_most_recent_and_protected() {
+        let runs = temp_root("prune-runs");
+        fs::create_dir_all(&runs).unwrap();
+        // Lexical order of these names is chronological (fixed-width stamp).
+        for i in 0..5 {
+            fs::create_dir_all(runs.join(format!("odw-exec-1000000000{i}-0"))).unwrap();
+        }
+        // Keep the 2 newest, but protect one that would otherwise be pruned.
+        let protect = runs.join("odw-exec-10000000002-0");
+        prune_runs_keeping(&runs, 2, &[protect.as_path()]);
+        let remaining: Vec<String> = sorted_dirs(&runs)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(remaining.len(), 3, "expected 2 newest + 1 protected");
+        assert!(remaining.contains(&"odw-exec-10000000004-0".to_string()));
+        assert!(remaining.contains(&"odw-exec-10000000003-0".to_string()));
+        assert!(remaining.contains(&"odw-exec-10000000002-0".to_string())); // protected
+        assert!(!remaining.contains(&"odw-exec-10000000000-0".to_string()));
+        fs::remove_dir_all(&runs).unwrap();
     }
 
     fn temp_root(name: &str) -> PathBuf {

@@ -1647,6 +1647,7 @@ test("starter: built-in parallel-review-apply prints a runnable workflow", () =>
   assert(/dirty_task_files/.test(starter.out) && /allowDirtyTaskFiles/.test(starter.out), "starter output missing dirty task-file guard");
   assert(/duplicate_task_files/.test(starter.out) && /allowDuplicateTaskFiles/.test(starter.out), "starter output missing duplicate task-file guard");
   assert(/TASK_PLAN_SCHEMA/.test(starter.out) && /planning_failed/.test(starter.out), "starter output missing high-level request planner");
+  assert(/runtime: \{ enum: \["codex", "claude", "bamboo"\] \}/.test(starter.out), "starter task planner must not allow arbitrary runtimes");
   assert(/Planned task contracts/.test(starter.out) && /Current task/.test(starter.out), "starter output missing shared task context injection");
   assert(/Do not invent package entrypoints/.test(starter.out) && /do not skip tests/.test(starter.out), "starter output missing tests/docs ownership guard");
   assert(/captureMainWorktreeSnapshot/.test(starter.out) && /permission: "limited"/.test(starter.out), "starter output missing read-only final verification guard");

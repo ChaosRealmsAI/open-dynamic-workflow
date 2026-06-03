@@ -71,8 +71,8 @@ export default async function workflow() {
             files: { type: "array", items: { type: "string" } },
             prompt: { type: "string" },
             verify: { type: "string" },
-            runtime: { type: "string" },
-            permission: { type: "string" },
+            runtime: { enum: ["codex", "claude", "bamboo"] },
+            permission: { enum: ["limited", "max"] },
           },
         },
       },
@@ -90,6 +90,12 @@ export default async function workflow() {
     }
     if (Object.prototype.hasOwnProperty.call(task || {}, "file")) {
       normalized.file = task.file;
+    }
+    if (!["codex", "claude", "bamboo"].includes(normalized.runtime)) {
+      delete normalized.runtime;
+    }
+    if (!["limited", "max"].includes(normalized.permission)) {
+      delete normalized.permission;
     }
     return normalized;
   };
@@ -112,6 +118,7 @@ ${TEST}
 Return 2-6 tasks when practical. Each task must:
 - have a stable short kebab-case id;
 - declare repo-relative owned files with file or files;
+- omit runtime/permission unless the owner explicitly asks; if present, runtime must be codex, claude, or bamboo, and permission must be limited or max;
 - avoid duplicate file ownership across parallel tasks;
 - avoid .git, .odw, .pandacode, node_modules, absolute paths, and .. paths;
 - include a concrete prompt that states public API/data contracts when relevant;

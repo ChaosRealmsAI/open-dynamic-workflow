@@ -3,8 +3,8 @@
 This file is a contract for agents that write Open Dynamic Workflow scripts.
 
 The primary runtime is `odw exec`. Claude Code can still call the same scripts
-through `/odw` or `odw run`, but slash commands are compatibility entrypoints,
-not the required trigger.
+through `/odw`, but slash commands are compatibility entrypoints, not the
+required trigger.
 
 ## Required concepts
 

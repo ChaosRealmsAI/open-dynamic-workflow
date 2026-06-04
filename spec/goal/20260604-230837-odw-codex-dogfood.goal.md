@@ -499,6 +499,7 @@ Stop as budget-limited when:
 | 2026-06-05 00:03 CST | Final test/lint | `cargo fmt --check`; `/tmp/odw-dogfood-isolated-wUVV4h npm test`; `cargo test`; `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
 | 2026-06-05 00:04 CST | Final codexctl review | `codexctl plan --cwd /Users/Zhuanz/workspace/odw-oss --prompt-file spec/goal/20260604-230837-odw-codex-dogfood.codexctl-review.md --sandbox read-only --approval-policy never --model gpt-5.4-mini --effort low --timeout unlimited` | No concrete regressions found; residual risk limited to future Bamboo config/provider layout drift |
 | 2026-06-05 00:06 CST | Final smoke | `odw-bamboo-preflight-smoke.js`; `odw-parallel-index-smoke.js`; latest state inspection | Passed on current code; Bamboo smoke run `odw-exec-1780589198793-28851`; parallel smoke run `odw-exec-1780589198802-28850`; indexes `1,2,3,4,5` |
+| 2026-06-05 00:07 CST | Commit | `git commit -m "Dogfood ODW Codex backend orchestration"` | Created commit `67603e7` with runner fixes, selftests, and dogfood evidence artifacts |
 
 ## Final Report Requirements
 

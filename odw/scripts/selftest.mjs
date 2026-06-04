@@ -1489,6 +1489,62 @@ test("examples: parallel-review-apply includes symbol-named root cause with symp
   }
 });
 
+test("examples: parallel-review-apply does not let prompt API mentions broaden file-path repair", () => {
+  const { dir } = makeGitRepo("odw-example-07-repair-file-path-over-prompt-");
+  try {
+    const scriptPath = join(REPO, "examples/07-parallel-review-apply.js");
+    const input = {
+      test: "node -e \"console.log('file path repair verify ok')\"",
+      maxReviewRounds: 2,
+      tasks: [
+        {
+          id: "owner-inbox",
+          file: "src/owner-inbox.js",
+          prompt: "Create buildOwnerInbox(input) and detectDecisionConflicts(input) in src/owner-inbox.js."
+        },
+        {
+          id: "markdown",
+          file: "src/markdown.js",
+          prompt: "Create renderMarkdownHandoff(input) in src/markdown.js."
+        },
+        {
+          id: "progress",
+          file: "src/progress.js",
+          prompt: "Create summarizeBatchProgress(input) in src/progress.js."
+        },
+        {
+          id: "public-api",
+          file: "src/index.js",
+          prompt:
+            "Re-export buildOwnerInbox, detectDecisionConflicts, renderMarkdownHandoff, and summarizeBatchProgress from src/index.js."
+        }
+      ],
+      reviewers: [
+        {
+          label: "integration-review",
+          runtime: "codex",
+          perspective:
+            'MOCK_REJECT_ONCE_BLOCKER:src/markdown.js filters progress.nextAgentActions by item.status === "blocked", but src/progress.js emits nextAgentActions with type: "blocker"; progress-only handoffs omit the Blockers section.'
+        }
+      ]
+    };
+    const r = run(null, { cwd: dir, scriptPath, input });
+    assert(r.code === 0, `example 07 file-path repair run failed: ${r.out.slice(-900)}`);
+    assert(/repairing tasks=markdown/.test(r.out), `repair broadened beyond root-cause file path: ${r.out.slice(-900)}`);
+    const result = r.state.result;
+    const repairPlan = result.history.find((item) => item.step === "repair_plan" && item.round === 2);
+    assert(repairPlan?.tasks?.join("|") === "markdown", `wrong repair tasks: ${JSON.stringify(repairPlan)}`);
+    assert(repairPlan.retained_files?.includes("src/owner-inbox.js"), `owner inbox candidate was not retained: ${JSON.stringify(repairPlan)}`);
+    assert(repairPlan.retained_files?.includes("src/progress.js"), `progress candidate was not retained: ${JSON.stringify(repairPlan)}`);
+    assert(repairPlan.retained_files?.includes("src/index.js"), `public API candidate was not retained: ${JSON.stringify(repairPlan)}`);
+    assert(/mock change by repair:markdown/.test(readFileSync(join(dir, "src/markdown.js"), "utf8")), "markdown task should land repair candidate");
+    assert(/mock change by impl:progress/.test(readFileSync(join(dir, "src/progress.js"), "utf8")), "progress task should retain initial candidate");
+    assert(/mock change by impl:public-api/.test(readFileSync(join(dir, "src/index.js"), "utf8")), "public API task should retain initial candidate");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("examples: parallel-review-apply defaults to three review rounds for 3 tasks", () => {
   const { dir } = makeGitRepo("odw-example-07-default-rounds-");
   try {

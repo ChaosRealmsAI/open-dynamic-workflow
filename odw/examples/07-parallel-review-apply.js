@@ -678,10 +678,10 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
     return matches;
   };
 
-  const symbolTasksForBlocker = (blocker, tasksWithFiles) => {
+  const symbolTasksForBlocker = (blocker, tasksWithFiles, options = {}) => {
     const text = String(blocker || "");
     const matches = symbolMatchesForBlocker(text, tasksWithFiles, taskDefinedSymbols);
-    if (matches.length === 0) {
+    if (matches.length === 0 && options.includePromptFallback !== false) {
       matches.push(...symbolMatchesForBlocker(text, tasksWithFiles, extractPromptOwnedSymbols));
     }
     if (matches.length === 0) {
@@ -715,13 +715,43 @@ ${reviewLines}`.slice(0, args?.maxRepairFeedbackChars || 12000);
         }
       }
     }
-    const symbolMatches = symbolTasksForBlocker(blocker, tasksWithFiles);
-    if (symbolMatches.length > 0) {
+    const positiveFileTasks = () => {
       const positiveFileMatches = matches.filter((match) => match.score > 0);
-      return uniqueTasks([...positiveFileMatches.map((match) => match.task), ...symbolMatches]);
+      if (positiveFileMatches.length === 0) {
+        return [];
+      }
+      const bestScore = Math.max(...positiveFileMatches.map((match) => match.score));
+      const bestIndex = Math.min(
+        ...positiveFileMatches
+          .filter((match) => match.score === bestScore)
+          .map((match) => match.index)
+      );
+      return uniqueTasks(
+        positiveFileMatches
+          .filter((match) => match.score === bestScore && match.index === bestIndex)
+          .map((match) => match.task)
+      );
+    };
+    const definedSymbolMatches = symbolTasksForBlocker(blocker, tasksWithFiles, {
+      includePromptFallback: false,
+    });
+    if (matches.length > 0 && definedSymbolMatches.length > 0) {
+      return uniqueTasks([...positiveFileTasks(), ...definedSymbolMatches]);
+    }
+    const allowPromptSymbolFallback =
+      matches.length === 0 || /\b(symptom|caller|callsite|call-site|stack trace)\b/i.test(text);
+    const symbolMatches = symbolTasksForBlocker(blocker, tasksWithFiles, {
+      includePromptFallback: allowPromptSymbolFallback,
+    });
+    if (symbolMatches.length > 0) {
+      return uniqueTasks([...positiveFileTasks(), ...symbolMatches]);
     }
     if (matches.length === 0) {
       return [];
+    }
+    const positiveTasks = positiveFileTasks();
+    if (positiveTasks.length > 0) {
+      return positiveTasks;
     }
     const bestScore = Math.max(...matches.map((match) => match.score));
     if (bestScore > 0) {

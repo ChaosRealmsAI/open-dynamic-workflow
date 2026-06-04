@@ -2606,8 +2606,13 @@ mod tests {
         assert!(ODW_JS_RUNNER.contains("globalThis.fanout"));
         assert!(ODW_JS_RUNNER.contains("globalThis.pipeline"));
         assert!(ODW_JS_RUNNER.contains("globalThis.log"));
+        assert!(ODW_JS_RUNNER.contains("const index = agentIndex"));
+        assert!(!ODW_JS_RUNNER.contains("index: agentIndex"));
         assert!(ODW_JS_RUNNER.contains("globalThis.promptSlot"));
         assert!(ODW_JS_RUNNER.contains("globalThis.args"));
+        assert!(ODW_JS_RUNNER.contains("bambooApiKeyPreflight"));
+        assert!(ODW_JS_RUNNER.contains("bamboo_missing_api_key"));
+        assert!(ODW_JS_RUNNER.contains("panda_preflight_blocked"));
         assert!(ODW_JS_RUNNER.contains("appendSchemaContract"));
         assert!(ODW_JS_RUNNER.contains("ODW final response contract"));
         assert!(ODW_JS_RUNNER.contains("The final response must start with { and end with }"));

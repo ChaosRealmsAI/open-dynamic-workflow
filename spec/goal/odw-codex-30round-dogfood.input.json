@@ -1,0 +1,36 @@
+{
+  "projectTask": "Dogfood ODW on this isolated Dogfood Taskboard CLI project. Evaluate CLI ergonomics, task storage, reports, tests, docs, failure modes, and whether ODW orchestration improves multi-agent evidence gathering over direct codexctl.",
+  "codexModel": "gpt-5.4-mini",
+  "codexEffort": "low",
+  "exitCodexEffort": "medium",
+  "codexTimeout": 300,
+  "codexConcurrency": 3,
+  "enableBamboo": true,
+  "bambooTrials": [
+    {
+      "id": "bamboo-entry-high-qwen",
+      "label": "bamboo-entry-high-qwen",
+      "provider": "qwen",
+      "model": "qwen3.7-max",
+      "purpose": "High-quality domestic entry planner",
+      "prompt": "Act as a high-quality domestic-model entry planner. Inspect package.json, README.md, src/, and test/. Return a concise audit plan and note whether this model is a good entry planner. Do not edit files."
+    },
+    {
+      "id": "bamboo-exec-low-qwen",
+      "label": "bamboo-exec-low-qwen",
+      "provider": "qwen",
+      "model": "qwen3.6-flash",
+      "effort": "low",
+      "purpose": "Low-cost domestic execution lane",
+      "prompt": "Act as a lower-cost domestic-model execution lane. Inspect src/ and test/ quickly. Return one low-risk issue candidate and one validation command. Do not edit files."
+    },
+    {
+      "id": "bamboo-exit-high-kimi",
+      "label": "bamboo-exit-high-kimi",
+      "provider": "kimi",
+      "model": "kimi-k2.6",
+      "purpose": "High-quality domestic exit reviewer",
+      "prompt": "Act as a high-quality domestic-model exit reviewer. Inspect the repository and identify the top risk in letting cheaper execution agents produce changes. Do not edit files."
+    }
+  ]
+}

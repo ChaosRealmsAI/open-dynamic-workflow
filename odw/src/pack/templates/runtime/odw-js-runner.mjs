@@ -141,7 +141,8 @@ globalThis.checkpoint = (name, value = null) => {
 
 globalThis.agent = async (prompt, options = {}) => {
   agentIndex += 1;
-  const label = options.label || `agent-${agentIndex}`;
+  const index = agentIndex;
+  const label = options.label || `agent-${index}`;
   const phase = options.phase || currentPhase || "";
   const agentType = firstText(options.agentType, options.nodeType, options.role) || undefined;
   const normalizedOptions = { ...options, label, phase };
@@ -176,8 +177,8 @@ globalThis.agent = async (prompt, options = {}) => {
         retryable: false
       }
     };
-    markAgentFailed({ key, label, phase, agentType, attempt: 1, maxAttempts, result });
-    emit({ type: "agent_done", index: agentIndex, key, label, phase, agentType, attempt: 1, maxAttempts, ok: false, result });
+    markAgentFailed({ index, key, label, phase, agentType, attempt: 1, maxAttempts, result });
+    emit({ type: "agent_done", index, key, label, phase, agentType, attempt: 1, maxAttempts, ok: false, result });
     return result;
   }
   const cached = state.agents[key];
@@ -186,7 +187,7 @@ globalThis.agent = async (prompt, options = {}) => {
     && cached?.result !== undefined
     && (cached.fingerprint === undefined || cached.fingerprint === fingerprint)
   ) {
-    emit({ type: "agent_skip", index: agentIndex, key, label, phase, agentType, reason: "cached", result: cached.result });
+    emit({ type: "agent_skip", index, key, label, phase, agentType, reason: "cached", result: cached.result });
     return cached.result;
   }
 
@@ -219,8 +220,8 @@ globalThis.agent = async (prompt, options = {}) => {
     maxAttempts: maxAttempts > 1 ? maxAttempts : undefined,
   };
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    markAgentActive({ key, label, phase, agentType, attempt, maxAttempts });
-    emit({ type: "agent_start", index: agentIndex, key, label, phase, agentType, runtime: displayRuntime, model: displayModel, promptPreview, config: nodeConfig, attempt, maxAttempts });
+    markAgentActive({ index, key, label, phase, agentType, attempt, maxAttempts });
+    emit({ type: "agent_start", index, key, label, phase, agentType, runtime: displayRuntime, model: displayModel, promptPreview, config: nodeConfig, attempt, maxAttempts });
     try {
       const rawResult = await runAgent(attemptPrompt, { ...normalizedOptions, attempt, previousFailure });
       // Count every dispatched attempt's tokens. A node that retries or ultimately
@@ -250,7 +251,7 @@ globalThis.agent = async (prompt, options = {}) => {
           : displayModel;
         state.agents[key] = {
           ok,
-          index: agentIndex,
+          index,
           key,
           fingerprint,
           label,
@@ -267,7 +268,7 @@ globalThis.agent = async (prompt, options = {}) => {
         delete state.activeAgents[key];
         delete state.failedAgents[key];
         saveState();
-        emit({ type: "agent_done", index: agentIndex, key, label, phase, agentType, runtime: displayRuntime, model: resolvedModel, attempt, maxAttempts, ok, tokens: nodeTotalTokens(rawResult), result: finalResult });
+        emit({ type: "agent_done", index, key, label, phase, agentType, runtime: displayRuntime, model: resolvedModel, attempt, maxAttempts, ok, tokens: nodeTotalTokens(rawResult), result: finalResult });
         return finalResult;
       }
 
@@ -287,7 +288,7 @@ globalThis.agent = async (prompt, options = {}) => {
         const retryable = attempt < maxAttempts;
         emit({
           type: "agent_schema_invalid",
-          index: agentIndex,
+          index,
           key,
           label,
           phase,
@@ -309,11 +310,11 @@ globalThis.agent = async (prompt, options = {}) => {
             updatedAt: new Date().toISOString()
           };
           saveState();
-          emit({ type: "agent_retry", index: agentIndex, key, label, phase, agentType, attempt, nextAttempt: attempt + 1, maxAttempts, reason: "schema_mismatch" });
+          emit({ type: "agent_retry", index, key, label, phase, agentType, attempt, nextAttempt: attempt + 1, maxAttempts, reason: "schema_mismatch" });
           continue;
         }
-        markAgentFailed({ key, label, phase, agentType, attempt, maxAttempts, result: previousFailure });
-        emit({ type: "agent_done", index: agentIndex, key, label, phase, agentType, attempt, maxAttempts, ok: false, result: previousFailure });
+        markAgentFailed({ index, key, label, phase, agentType, attempt, maxAttempts, result: previousFailure });
+        emit({ type: "agent_done", index, key, label, phase, agentType, attempt, maxAttempts, ok: false, result: previousFailure });
         return previousFailure;
       }
 
@@ -337,12 +338,12 @@ globalThis.agent = async (prompt, options = {}) => {
           updatedAt: new Date().toISOString()
         };
         saveState();
-        emit({ type: "agent_retry", index: agentIndex, key, label, phase, agentType, attempt, nextAttempt: attempt + 1, maxAttempts, reason: result?.error?.category || "worker_failed" });
+        emit({ type: "agent_retry", index, key, label, phase, agentType, attempt, nextAttempt: attempt + 1, maxAttempts, reason: result?.error?.category || "worker_failed" });
         continue;
       }
 
-      markAgentFailed({ key, label, phase, agentType, attempt, maxAttempts, result });
-      emit({ type: "agent_done", index: agentIndex, key, label, phase, agentType, attempt, maxAttempts, ok: false, result });
+      markAgentFailed({ index, key, label, phase, agentType, attempt, maxAttempts, result });
+      emit({ type: "agent_done", index, key, label, phase, agentType, attempt, maxAttempts, ok: false, result });
       return result;
     } catch (error) {
       previousResult = {
@@ -372,11 +373,11 @@ globalThis.agent = async (prompt, options = {}) => {
           updatedAt: new Date().toISOString()
         };
         saveState();
-        emit({ type: "agent_retry", index: agentIndex, key, label, phase, agentType, attempt, nextAttempt: attempt + 1, maxAttempts, reason: "workflow_agent_failed" });
+        emit({ type: "agent_retry", index, key, label, phase, agentType, attempt, nextAttempt: attempt + 1, maxAttempts, reason: "workflow_agent_failed" });
         continue;
       }
-      markAgentFailed({ key, label, phase, agentType, attempt, maxAttempts, result: previousFailure });
-      emit({ type: "agent_done", index: agentIndex, key, label, phase, agentType, attempt, maxAttempts, ok: false, result: previousFailure });
+      markAgentFailed({ index, key, label, phase, agentType, attempt, maxAttempts, result: previousFailure });
+      emit({ type: "agent_done", index, key, label, phase, agentType, attempt, maxAttempts, ok: false, result: previousFailure });
       return previousFailure;
     }
   }
@@ -387,10 +388,10 @@ globalThis.agent = async (prompt, options = {}) => {
   };
 };
 
-function markAgentActive({ key, label, phase, agentType, attempt, maxAttempts }) {
+function markAgentActive({ index, key, label, phase, agentType, attempt, maxAttempts }) {
   state.activeAgents[key] = {
     key,
-    index: agentIndex,
+    index,
     label,
     phase,
     agentType,
@@ -403,11 +404,11 @@ function markAgentActive({ key, label, phase, agentType, attempt, maxAttempts })
   saveState();
 }
 
-function markAgentFailed({ key, label, phase, agentType, attempt, maxAttempts, result }) {
+function markAgentFailed({ index, key, label, phase, agentType, attempt, maxAttempts, result }) {
   delete state.activeAgents[key];
   state.failedAgents[key] = {
     key,
-    index: agentIndex,
+    index,
     label,
     phase,
     agentType,
@@ -2438,7 +2439,10 @@ async function autoAnswerNeedsInput(result, runtime, fallbackSession, execCwd, t
     if (runtime === "codex") {
       answerArgs.push("--codexctl-bin", codexctlBin);
     }
-    result = await runPandaCodeCommand(runtime, "answer", answerArgs, execCwd);
+    result = await runPandaCodeCommand(runtime, "answer", answerArgs, execCwd, {
+      session,
+      label: `${session || fallbackSession || "agent"}-answer-${round}`
+    });
   }
   return result;
 }
@@ -2446,13 +2450,28 @@ async function autoAnswerNeedsInput(result, runtime, fallbackSession, execCwd, t
 async function runPandaCode(prompt, options) {
   const execCwd = options.execCwd || cwd;
   const runtime = inferPandaRuntime(options);
-  const promptFile = writePromptFile(prompt, { ...options, label: `${runtime}-${options.label || options.id || "agent"}` });
   const session = sanitizeSessionName(
     options.session
     || options.sessionName
     || `${runId}-${options.id || options.nodeId || options.label || "agent"}-${options.attempt || 1}`
   );
   const selectedProvider = options.provider || options.bambooProvider || provider;
+  const selectedModel = options.model || model;
+  if (runtime === "bamboo") {
+    const keyPreflight = bambooApiKeyPreflight({ provider: selectedProvider, model: selectedModel, session, label: options.label || options.id });
+    if (keyPreflight) {
+      emit({
+        type: "panda_preflight_blocked",
+        runtime,
+        session,
+        label: options.label || options.id || "",
+        category: keyPreflight.error?.category,
+        remediation: keyPreflight.remediation
+      });
+      return keyPreflight;
+    }
+  }
+  const promptFile = writePromptFile(prompt, { ...options, label: `${runtime}-${options.label || options.id || "agent"}` });
   const args = [
     runtime,
     "exec"
@@ -2472,7 +2491,6 @@ async function runPandaCode(prompt, options) {
     promptFile,
     "--json"
   );
-  const selectedModel = options.model || model;
   if (selectedModel) {
     args.push("--model", selectedModel);
   }
@@ -2510,8 +2528,178 @@ async function runPandaCode(prompt, options) {
     const permission = options.permission === "limited" ? "limited" : "max";
     args.push("--permission", permission);
   }
-  const result = await runPandaCodeCommand(runtime, "exec", args, execCwd);
+  const result = await runPandaCodeCommand(runtime, "exec", args, execCwd, {
+    session,
+    label: options.label || options.id || options.nodeId
+  });
   return autoAnswerNeedsInput(result, runtime, session, execCwd, timeoutMs);
+}
+
+const BAMBOO_PROVIDER_API_KEY_ENVS = {
+  openai: ["OPENAI_API_KEY"],
+  anthropic: ["ANTHROPIC_API_KEY"],
+  deepseek: ["DEEPSEEK_API_KEY"],
+  xiaomi: ["XIAOMI_API_KEY", "MIMO_API_KEY"],
+  kimi: ["KIMI_API_KEY", "MOONSHOT_API_KEY"],
+  zhipu: ["ZHIPU_API_KEY", "BIGMODEL_API_KEY", "GLM_API_KEY"],
+  minimax: ["MINIMAX_API_KEY", "MINIMAXI_API_KEY"],
+  qwen: ["QWEN_API_KEY", "DASHSCOPE_API_KEY", "BAILIAN_API_KEY", "ALIBABA_API_KEY"],
+  stepfun: ["STEPFUN_API_KEY", "STEP_API_KEY", "STEP_PLAN_API_KEY"]
+};
+
+const BAMBOO_PROVIDER_ALIASES = {
+  openai: ["openai", "openai-compatible", "gpt", "gpt-4", "gpt-5"],
+  anthropic: ["anthropic", "claude"],
+  deepseek: ["deepseek", "deepseek-v4", "deepseek-v4-pro", "deepseek-chat"],
+  xiaomi: ["xiaomi", "mimo", "mimo-v2.5-pro"],
+  kimi: ["kimi", "moonshot", "moonshot-ai", "kimi-k2.6", "kimi-k2.5", "kimi-k2-thinking"],
+  zhipu: ["zhipu", "bigmodel", "glm", "chatglm", "glm-5.1", "glm-5", "glm-5-turbo", "glm-4.7"],
+  minimax: ["minimax", "minimaxi", "minimax-m3", "m3", "minimax-m2.7", "m2.7"],
+  qwen: ["qwen", "dashscope", "aliyun", "alibaba", "bailian", "tongyi", "qwen3.7-max", "qwen3.6-plus", "qwen3.6-flash"],
+  stepfun: ["stepfun", "step", "stepai", "step-ai", "step-3.7", "step-3.7-flash", "jieyue", "jieyuexingchen"]
+};
+
+function bambooApiKeyPreflight({ provider: selectedProvider, model: selectedModel, session, label }) {
+  const providerName = resolveBambooProviderName(selectedProvider, selectedModel);
+  if (selectedProvider && !providerName) {
+    const supported = Object.keys(BAMBOO_PROVIDER_API_KEY_ENVS).join(", ");
+    return {
+      ok: false,
+      backend: "pandacode",
+      runtime: "bamboo",
+      action: "preflight",
+      state: "blocked",
+      session,
+      provider: selectedProvider,
+      model: selectedModel || undefined,
+      remediation: `Use a supported Bamboo provider: ${supported}.`,
+      error: {
+        category: "bamboo_unknown_provider",
+        message: `Unknown Bamboo provider "${selectedProvider}". Use one of: ${supported}.`,
+        retryable: false
+      },
+      adapter: {
+        backend: "pandacode",
+        runtime: "bamboo",
+        preflight: true
+      },
+      label: label || undefined
+    };
+  }
+  const requiredEnv = bambooApiKeyEnvCandidates(providerName);
+  if (requiredEnv.some(envValueSet) || bambooConfigHasApiKey()) {
+    return null;
+  }
+  const providerLabel = providerName || "configured Bamboo provider";
+  const remediation = `Set one of ${requiredEnv.join(", ")} or configure api_key in PandaCode Bamboo config.`;
+  return {
+    ok: false,
+    backend: "pandacode",
+    runtime: "bamboo",
+    action: "preflight",
+    state: "blocked",
+    session,
+    provider: providerName || selectedProvider || undefined,
+    model: selectedModel || undefined,
+    missing: requiredEnv,
+    remediation,
+    error: {
+      category: "bamboo_missing_api_key",
+      message: `Bamboo ${providerLabel} is missing an API key. ${remediation}`,
+      retryable: false
+    },
+    adapter: {
+      backend: "pandacode",
+      runtime: "bamboo",
+      preflight: true
+    },
+    label: label || undefined
+  };
+}
+
+function resolveBambooProviderName(selectedProvider, selectedModel) {
+  if (String(selectedProvider || "").trim()) {
+    return normalizeBambooProvider(selectedProvider);
+  }
+  return inferBambooProviderFromModel(selectedModel)
+    || normalizeBambooProvider(process.env.PANDACODE_BAMBOO_PROVIDER)
+    || "deepseek";
+}
+
+function normalizeBambooProvider(value) {
+  const normalized = bambooHintTokens(value);
+  if (!normalized.length) {
+    return null;
+  }
+  const joined = normalized.join("-");
+  for (const [providerName, aliases] of Object.entries(BAMBOO_PROVIDER_ALIASES)) {
+    if (aliases.some((alias) => hintMatchesAlias(joined, normalized, alias))) {
+      return providerName;
+    }
+  }
+  return null;
+}
+
+function inferBambooProviderFromModel(value) {
+  return normalizeBambooProvider(value);
+}
+
+function bambooHintTokens(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) {
+    return [];
+  }
+  return text
+    .replace(/_/g, "-")
+    .split(/[^a-z0-9.]+/)
+    .filter(Boolean);
+}
+
+function hintMatchesAlias(joinedHint, tokens, alias) {
+  const normalizedAlias = alias.toLowerCase().replace(/_/g, "-");
+  return tokens.includes(normalizedAlias)
+    || joinedHint === normalizedAlias
+    || joinedHint.startsWith(`${normalizedAlias}-`)
+    || joinedHint.startsWith(`${normalizedAlias}.`);
+}
+
+function bambooApiKeyEnvCandidates(providerName) {
+  return dedupeStrings([
+    "PANDACODE_BAMBOO_API_KEY",
+    "BAMBOO_API_KEY",
+    ...(BAMBOO_PROVIDER_API_KEY_ENVS[providerName] || [])
+  ]);
+}
+
+function envValueSet(name) {
+  return typeof process.env[name] === "string" && process.env[name].trim() !== "";
+}
+
+function bambooConfigHasApiKey() {
+  const candidates = dedupeStrings([
+    process.env.PANDACODE_BAMBOO_CONFIG_DIR ? `${process.env.PANDACODE_BAMBOO_CONFIG_DIR}/config.toml` : "",
+    process.env.BAMBOO_CONFIG_DIR ? `${process.env.BAMBOO_CONFIG_DIR}/config.toml` : "",
+    `${os.homedir()}/.pandacode/bamboo/config.toml`
+  ]);
+  for (const path of candidates) {
+    if (!path || !existsSync(path)) {
+      continue;
+    }
+    try {
+      const raw = readFileSync(path, "utf8");
+      const match = raw.match(/^\s*api_key\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s#]+))/m);
+      if (match && String(match[1] || match[2] || match[3] || "").trim() !== "") {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function dedupeStrings(values) {
+  return [...new Set(values.filter((value) => typeof value === "string" && value.trim()).map((value) => value.trim()))];
 }
 
 function inferPandaRuntime(options) {
@@ -2549,7 +2737,7 @@ function sanitizeSessionName(value) {
     .slice(0, 180) || "odw-agent";
 }
 
-function runPandaCodeCommand(runtime, action, args, execCwd = cwd) {
+function runPandaCodeCommand(runtime, action, args, execCwd = cwd, context = {}) {
   return new Promise((resolve) => {
     const child = spawn(pandacodeBin, args, {
       cwd: execCwd,
@@ -2570,6 +2758,7 @@ function runPandaCodeCommand(runtime, action, args, execCwd = cwd) {
         backend: "pandacode",
         runtime,
         action,
+        session: context.session || context.label || "",
         exit_code: null,
         stdout_tail: stdout.slice(-4000),
         stderr_tail: stderr.slice(-4000),
@@ -2579,7 +2768,7 @@ function runPandaCodeCommand(runtime, action, args, execCwd = cwd) {
     child.on("close", (code) => {
       const parsed = parsePandaCodeReportFromStdout(stdout) || parseJsonObjectFromText(stdout);
       if (parsed) {
-        resolve(normalizePandaCodeReport(parsed, { runtime, action, exit_code: code, stdout, stderr }));
+        resolve(normalizePandaCodeReport(parsed, { runtime, action, exit_code: code, stdout, stderr, ...context }));
         return;
       }
       resolve({
@@ -2587,6 +2776,7 @@ function runPandaCodeCommand(runtime, action, args, execCwd = cwd) {
         backend: "pandacode",
         runtime,
         action,
+        session: context.session || context.label || "",
         exit_code: code,
         stdout_tail: stdout.slice(-4000),
         stderr_tail: stderr.slice(-4000),
@@ -2631,7 +2821,7 @@ function normalizePandaCodeReport(report, context) {
   }
   const runtime = report.runtime || context.runtime;
   const action = report.action || context.action;
-  const rawReportPath = writePandaCodeRawReport(report, { runtime, action });
+  const rawReportPath = writePandaCodeRawReport(report, { runtime, action, session: context.session, label: context.label });
   const rawSummary = report.summary && typeof report.summary === "object" && !Array.isArray(report.summary)
     ? report.summary
     : null;
@@ -2674,7 +2864,7 @@ function normalizePandaCodeReport(report, context) {
     // before compaction drops it, so observability can show it (vs "inherit").
     model: report.summary?.model || report.record?.model || report.model || undefined,
     action,
-    session: report.session || record?.session || "",
+    session: report.session || record?.session || context.session || context.label || "",
     state: report.state || summary?.status || "unknown",
     exit_code: context.exit_code,
     run_id: report.run_id || report.runId || record?.run_id || summary?.run_id || report.session || "",
@@ -2756,10 +2946,14 @@ function compactPandaDomainFields(report) {
   return output;
 }
 
-function writePandaCodeRawReport(report, { runtime, action }) {
+function writePandaCodeRawReport(report, { runtime, action, session: fallbackSession, label }) {
   try {
-    const session = sanitizeSessionName(report.session || report.record?.session || `${runtime || "runtime"}-${action || "action"}`).slice(0, 80);
-    const path = `${runDir}/pandacode-${sanitizeSessionName(runtime || "runtime")}-${session}.report.json`;
+    const rawSession = report.session || report.record?.session || fallbackSession || label || `${runtime || "runtime"}-${action || "action"}`;
+    const session = sanitizeSessionName(
+      rawSession
+    ).slice(0, 80);
+    const actionSuffix = action ? `-${sanitizeSessionName(action)}` : "";
+    const path = `${runDir}/pandacode-${sanitizeSessionName(runtime || "runtime")}-${session}${actionSuffix}.report.json`;
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(report, null, 2));
     return path;

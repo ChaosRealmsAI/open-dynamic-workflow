@@ -903,6 +903,26 @@ if (s === "bamboo_usage") {
   }) + "\\n");
   process.exit(0);
 }
+if (s === "needs_input_no_session") {
+  if (args[1] === "answer") {
+    process.stdout.write(JSON.stringify({
+      ok: true,
+      state: "completed",
+      runtime: args[0] || "",
+      last_agent_message: "ANSWERED_WITHOUT_SESSION",
+      summary: { last_agent_message: "ANSWERED_WITHOUT_SESSION" }
+    }) + "\\n");
+    process.exit(0);
+  }
+  process.stdout.write(JSON.stringify({
+    ok: false,
+    state: "waiting_for_user",
+    runtime: args[0] || "",
+    error: { category: "needs_input", message: "pick an option", retryable: true },
+    summary: { last_agent_message: "NEEDS_INPUT_WITHOUT_SESSION" }
+  }) + "\\n");
+  process.exit(0);
+}
 if (s === "jsonl_final_report") {
   process.stdout.write(JSON.stringify({ type: "start", message: "EARLY_EVENT_MESSAGE" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "delta", last_agent_message: "EARLY_EVENT_MESSAGE" }) + "\\n");
@@ -1052,7 +1072,7 @@ const helper = await pandacode.bamboo("y",{provider:"deepseek",label:"bamboo-hel
 log("PARGS="+args);
 log("HARGS="+helper);
 return { ok:true };`;
-  const r = run(wf, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "argv" } });
+  const r = run(wf, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "argv", PANDACODE_BAMBOO_API_KEY: "fake-key" } });
   assert(r.code === 0, `bamboo provider run failed: ${r.out.slice(-300)}`);
   assert(/PARGS=bamboo exec --provider deepseek\b/.test(r.out), `bamboo provider argv wrong: ${r.out.slice(-500)}`);
   assert(/HARGS=bamboo exec --provider deepseek\b/.test(r.out), `pandacode.bamboo helper argv wrong: ${r.out.slice(-500)}`);
@@ -1070,6 +1090,78 @@ return { ok: r?.ok !== false };`;
   assert(/provider is only supported for PandaCode Bamboo nodes; got runtime=codex/.test(r.out), `provider error unclear: ${r.out.slice(-500)}`);
 });
 
+test("pandacode: Bamboo missing API key is blocked before prompt/executor dispatch", () => {
+  const configDir = mkdtempSync(join(tmpRoot, "empty-bamboo-config-"));
+  const wf = `export const meta={name:"bpre"};
+const r = await agent("x",{runtime:"bamboo",provider:"deepseek",label:"missing-bamboo",id:"missing-bamboo"});
+return { ok: r?.ok === false && r?.state === "blocked" && r?.error?.category === "bamboo_missing_api_key" };`;
+  const r = run(wf, {
+    backend: "pandacode",
+    pandacodeBin: fakePanda,
+    env: {
+      FAKE_PANDA: "argv",
+      PANDACODE_BAMBOO_API_KEY: "",
+      BAMBOO_API_KEY: "",
+      DEEPSEEK_API_KEY: "",
+      PANDACODE_BAMBOO_PROVIDER: "",
+      PANDACODE_BAMBOO_CONFIG_DIR: configDir
+    }
+  });
+  assert(r.code === 0, `missing-key preflight workflow should handle blocked result: ${r.out.slice(-500)}`);
+  const blocked = r.state.failedAgents?.["missing-bamboo"]?.result;
+  assert(blocked?.state === "blocked", `state did not record blocked result: ${JSON.stringify(blocked)}`);
+  assert(blocked?.error?.category === "bamboo_missing_api_key", `wrong preflight category: ${JSON.stringify(blocked)}`);
+  assert(ev(r.events, "panda_preflight_blocked").length === 1, `missing preflight event: ${JSON.stringify(r.events.slice(-5))}`);
+  const files = readdirSync(r.runDir || tmpRoot);
+  assert(!files.some((file) => file.endsWith(".prompt.md")), `preflight wrote prompt files: ${files.join(",")}`);
+  assert(!files.some((file) => file.startsWith("pandacode-bamboo-")), `preflight wrote raw reports: ${files.join(",")}`);
+});
+
+test("pandacode: Bamboo default provider accepts Deepseek key without explicit provider", () => {
+  const configDir = mkdtempSync(join(tmpRoot, "empty-bamboo-config-"));
+  const wf = `export const meta={name:"bdef"};
+const r = await agent("x",{runtime:"bamboo",label:"default-bamboo",id:"default-bamboo"});
+log("DEFAULT_ARGS="+r);
+return { ok: typeof r === "string" && r.startsWith("bamboo exec ") };`;
+  const r = run(wf, {
+    backend: "pandacode",
+    pandacodeBin: fakePanda,
+    env: {
+      FAKE_PANDA: "argv",
+      PANDACODE_BAMBOO_API_KEY: "",
+      BAMBOO_API_KEY: "",
+      DEEPSEEK_API_KEY: "fake-deepseek-key",
+      PANDACODE_BAMBOO_CONFIG_DIR: configDir
+    }
+  });
+  assert(r.code === 0, `default Deepseek-key Bamboo run should dispatch: ${r.out.slice(-500)}`);
+  assert(/DEFAULT_ARGS=bamboo exec\b/.test(r.out), `default Bamboo argv missing: ${r.out.slice(-500)}`);
+});
+
+test("pandacode: unknown Bamboo provider is blocked before executor dispatch", () => {
+  const configDir = mkdtempSync(join(tmpRoot, "empty-bamboo-config-"));
+  const wf = `export const meta={name:"bunk"};
+const r = await agent("x",{runtime:"bamboo",provider:"not-a-provider",label:"unknown-bamboo",id:"unknown-bamboo"});
+return { ok: r?.ok === false && r?.state === "blocked" && r?.error?.category === "bamboo_unknown_provider" };`;
+  const r = run(wf, {
+    backend: "pandacode",
+    pandacodeBin: fakePanda,
+    env: {
+      FAKE_PANDA: "argv",
+      PANDACODE_BAMBOO_API_KEY: "",
+      BAMBOO_API_KEY: "",
+      DEEPSEEK_API_KEY: "",
+      PANDACODE_BAMBOO_CONFIG_DIR: configDir
+    }
+  });
+  assert(r.code === 0, `unknown-provider preflight workflow should handle blocked result: ${r.out.slice(-500)}`);
+  const blocked = r.state.failedAgents?.["unknown-bamboo"]?.result;
+  assert(blocked?.error?.category === "bamboo_unknown_provider", `wrong unknown-provider category: ${JSON.stringify(blocked)}`);
+  const files = readdirSync(r.runDir || tmpRoot);
+  assert(!files.some((file) => file.endsWith(".prompt.md")), `unknown-provider preflight wrote prompt files: ${files.join(",")}`);
+  assert(!files.some((file) => file.startsWith("pandacode-bamboo-")), `unknown-provider preflight wrote raw reports: ${files.join(",")}`);
+});
+
 test("mock: Bamboo provider agent returns normally", () => {
   const wf = `export const meta={name:"mb"};
 const r = await agent("x",{runtime:"bamboo",provider:"deepseek",label:"mock-bamboo",id:"mock-bamboo"});
@@ -1085,11 +1177,28 @@ test("budget: Bamboo usage total_tokens accrues when reported", () => {
 await agent("x",{runtime:"bamboo",provider:"deepseek",label:"usage-bamboo",id:"usage-bamboo"});
 log("BUDGET spent="+budget.spent()+" approx="+Boolean(budget.approx));
 return { ok:true };`;
-  const r = run(wf, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "bamboo_usage" }, input: { budget: { total: 1000 } } });
+  const r = run(wf, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "bamboo_usage", PANDACODE_BAMBOO_API_KEY: "fake-key" }, input: { budget: { total: 1000 } } });
   assert(r.code === 0, `bamboo usage run failed: ${r.out.slice(-300)}`);
   assert(/BUDGET spent=123/.test(r.out), `bamboo usage not accrued: ${r.out.slice(-500)}`);
   assert(r.state.budget?.spent === 123, `state budget spent wrong: ${JSON.stringify(r.state.budget)}`);
   assert(r.state.budget?.approx !== true, `usage-backed bamboo node should not mark approx: ${JSON.stringify(r.state.budget)}`);
+});
+
+test("pandacode: raw reports for exec and answer do not overwrite without downstream session", () => {
+  const wf = `export const meta={name:"brpt"};
+const r = await agent("x",{runtime:"bamboo",provider:"deepseek",label:"needs-input-bamboo",id:"needs-input-bamboo"});
+log("RAW_TEXT="+r);
+return { ok: r === "ANSWERED_WITHOUT_SESSION" };`;
+  const r = run(wf, {
+    backend: "pandacode",
+    pandacodeBin: fakePanda,
+    env: { FAKE_PANDA: "needs_input_no_session", PANDACODE_BAMBOO_API_KEY: "fake-key" }
+  });
+  assert(r.code === 0, `needs-input raw report workflow failed: ${r.out.slice(-500)}`);
+  const reports = readdirSync(r.runDir || tmpRoot).filter((file) => file.startsWith("pandacode-bamboo-") && file.endsWith(".report.json"));
+  assert(reports.some((file) => file.endsWith("-exec.report.json")), `missing exec raw report: ${reports.join(",")}`);
+  assert(reports.some((file) => file.endsWith("-answer.report.json")), `missing answer raw report: ${reports.join(",")}`);
+  assert(reports.length >= 2, `raw reports were overwritten: ${reports.join(",")}`);
 });
 
 test("doctor: Bamboo is reported but missing api_key does not fail ODW top-level health", () => {
@@ -1123,7 +1232,7 @@ test("pandacode: bamboo summary.summary becomes the node's final text", () => {
   const r = run(`export const meta={name:"bs"};
 const t = await agent("hi", { runtime:"bamboo", provider:"deepseek", label:"b" });
 log("BAMBOO text="+JSON.stringify(typeof t === "string" ? t : (t && t.text)));
-return {ok:true};`, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "bamboo_reply" } });
+return {ok:true};`, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "bamboo_reply", PANDACODE_BAMBOO_API_KEY: "fake-key" } });
   assert(r.code === 0, `run failed: ${r.out.slice(-200)}`);
   assert(/BAMBOO text="BAMBOO-REPLY-TEXT"/.test(r.out), `bamboo reply (summary.summary) not extracted: ${r.out.slice(-300)}`);
 });

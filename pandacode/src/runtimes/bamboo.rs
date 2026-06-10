@@ -105,6 +105,10 @@ async fn answer(args: AnswerCommandArgs) -> Result<()> {
             stdin: None,
             task: Some(answer),
             task_file: None,
+            prompt_append: Vec::new(),
+            detach: false,
+            expect_artifact: Vec::new(),
+            objective: None,
             cd: root,
             session: record.session,
             model: None,
@@ -128,12 +132,19 @@ async fn run_turn(
     resume_target: Option<String>,
     action: &str,
 ) -> Result<()> {
+    if args.common.detach {
+        anyhow::bail!("--detach is only supported on the codex runtime");
+    }
+    if args.common.objective.is_some() {
+        anyhow::bail!("--objective is only supported on the codex runtime");
+    }
     let raw_task = read_task(
         args.common.task.as_deref(),
         args.common.task_file.as_deref(),
         args.common.stdin.as_deref(),
         Some(&root),
     )?;
+    let raw_task = crate::io::apply_prompt_parts(&raw_task, &args.common.prompt_append, Some(&root))?;
     let model = effective_model(args.common.model.as_deref(), record.model.as_deref());
     let provider = effective_provider(
         args.provider.as_deref(),

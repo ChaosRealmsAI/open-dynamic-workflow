@@ -44,6 +44,8 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Artifacts(args) => runtimes::session_agent(args, "artifacts").await,
         Commands::Interrupt(args) => runtimes::session_agent(args, "interrupt").await,
         Commands::Stop(args) => runtimes::session_agent(args, "stop").await,
+        Commands::Wait(args) => runtimes::wait_sessions(args),
+        Commands::Gc(args) => runtimes::gc_sessions(args),
         Commands::Doctor(args) => runtimes::doctor(args).await,
         Commands::List(args) => runtimes::list_all(args),
         Commands::Models(args) => runtimes::models_all(args).await,
@@ -86,6 +88,8 @@ fn command_wants_json(command: &Commands) -> bool {
         | Commands::Stop(args) => args.common.json,
         Commands::Logs(args) => args.common.json,
         Commands::Doctor(args) | Commands::List(args) | Commands::Models(args) => args.json,
+        Commands::Wait(args) => args.json,
+        Commands::Gc(args) => args.json,
         Commands::Codex(command) | Commands::Claude(command) => runtime_command_wants_json(command),
         Commands::Bamboo(command) => bamboo_command_wants_json(command),
     }

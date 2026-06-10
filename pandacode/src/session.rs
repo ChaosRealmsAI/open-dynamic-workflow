@@ -198,13 +198,6 @@ pub fn artifacts(root: &Path, runtime: &str, session: &str) -> Result<serde_json
     }))
 }
 
-pub fn require_run_id(record: &SessionRecord) -> Result<String> {
-    record
-        .run_id
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("session {} has no codex run_id", record.session))
-}
-
 fn runtime_dir(root: &Path, runtime: &str) -> PathBuf {
     pandacode_dir(root).join("sessions").join(runtime)
 }

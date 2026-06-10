@@ -42,13 +42,25 @@ pub enum Commands {
     Interrupt(AgentSessionCommandArgs),
     #[command(about = "Stop the latest or selected session")]
     Stop(AgentSessionCommandArgs),
+    #[command(
+        about = "Wait until the given sessions settle; succeed only when every session completes and every expected artifact exists"
+    )]
+    Wait(WaitCommandArgs),
+    #[command(
+        about = "Reclaim disk: prune PandaCode-owned prompts/logs/events/detached files older than --days (session records and Codex home are never touched)"
+    )]
+    Gc(GcCommandArgs),
     #[command(about = "Check runtimes and required local binaries")]
     Doctor(GlobalArgs),
     #[command(about = "List known PandaCode sessions for all runtimes")]
     List(GlobalArgs),
     #[command(about = "List models for all runtimes")]
     Models(GlobalArgs),
-    #[command(subcommand, about = "Run tasks through Codex app-server/control-plane")]
+    #[command(
+        subcommand,
+        about = "Run tasks directly through codex app-server (stdio JSON-RPC, no daemon)",
+        after_help = "Examples:\n  pandacode codex exec --task \"fix the failing tests\" --cd .\n  pandacode codex exec --detach --session build --task-file task.md   # background turn\n  pandacode codex status --session build        # live watch (state + last agent message)\n  pandacode codex answer --session build --choice 2   # answer a pending question\n  pandacode codex interrupt --session build     # abort the active turn\n  pandacode codex exec --auth-home ~/.codex-work --task \"...\"   # another account's auth, clean config\n  pandacode codex logs --session build --visible   # structured thread history\n  pandacode codex doctor                        # health + account + rate limits"
+    )]
     Codex(RuntimeCommand),
     #[command(subcommand, about = "Run tasks through Claude Code in tmux")]
     Claude(RuntimeCommand),
@@ -186,6 +198,54 @@ pub struct RuntimeGlobalArgs {
 }
 
 #[derive(Debug, Args, Clone)]
+pub struct WaitCommandArgs {
+    #[arg(
+        long = "session",
+        required = true,
+        value_name = "SESSION",
+        help = "Session id to wait for; repeat for multiple lanes"
+    )]
+    pub sessions: Vec<String>,
+    #[arg(long, default_value = ".", help = "Workspace directory")]
+    pub cd: PathBuf,
+    #[arg(
+        long,
+        default_value_t = 1_800_000,
+        help = "Overall wait timeout in milliseconds"
+    )]
+    pub timeout_ms: u64,
+    #[arg(long, default_value_t = 5_000, help = "Poll interval in milliseconds")]
+    pub interval_ms: u64,
+    #[arg(
+        long = "expect-artifact",
+        value_name = "PATH",
+        help = "File that must exist (relative to --cd) for the wait to succeed; repeat for multiple files"
+    )]
+    pub expect_artifact: Vec<PathBuf>,
+    #[arg(long, help = "Print machine-readable JSON")]
+    pub json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct GcCommandArgs {
+    #[arg(long, default_value = ".", help = "Workspace directory")]
+    pub cd: PathBuf,
+    #[arg(
+        long,
+        default_value_t = 7,
+        help = "Delete PandaCode-owned prompt/log/event/detached files older than this many days"
+    )]
+    pub days: u64,
+    #[arg(
+        long,
+        help = "Report what would be deleted without removing anything"
+    )]
+    pub dry_run: bool,
+    #[arg(long, help = "Print machine-readable JSON")]
+    pub json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
 pub struct AgentTaskCommandArgs {
     #[command(flatten)]
     pub common: TaskCommandArgs,
@@ -238,6 +298,28 @@ pub struct TaskCommandArgs {
     pub task: Option<String>,
     #[arg(long, value_name = "PATH", help = "Read task text from a file")]
     pub task_file: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "TEXT|builtin:NAME|@FILE|file:PATH|text:TEXT",
+        help = "Append a prompt part after the task; repeat for multiple ordered parts. All runtimes resolve builtin:NAME (embedded role prompts), @FILE, file:PATH, and text:TEXT locally"
+    )]
+    pub prompt_append: Vec<String>,
+    #[arg(
+        long,
+        help = "Codex/Claude: return immediately and run the turn in a detached background worker; observe with status, block with `pandacode wait`, end with stop"
+    )]
+    pub detach: bool,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Require this file to exist (relative to --cd) after a completed turn, otherwise the state becomes no_report; repeat for multiple files"
+    )]
+    pub expect_artifact: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Codex only: set a thread goal/objective before the turn starts"
+    )]
+    pub objective: Option<String>,
     #[arg(long, default_value = ".", help = "Workspace directory")]
     pub cd: PathBuf,
     #[arg(long, default_value = "latest", help = "Session id, or latest")]
@@ -474,6 +556,8 @@ pub struct BambooRunArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct RuntimeBins {
+    /// Deprecated and ignored: the Codex runtime now drives `codex app-server`
+    /// directly. Kept so existing callers passing --codexctl-bin do not break.
     #[arg(long, hide = true, default_value = "codexctl")]
     pub codexctl_bin: String,
     #[arg(long, hide = true, default_value = "codex")]
@@ -484,6 +568,20 @@ pub struct RuntimeBins {
     pub tmux_bin: String,
     #[arg(long, hide = true, default_value = "summary")]
     pub log_mode: String,
+    #[arg(
+        long,
+        alias = "codex-auth-home",
+        value_name = "DIR",
+        conflicts_with = "codex_home",
+        help = "Codex account switch: copy auth material from this Codex home (e.g. ~/.codex-work) into PandaCode's managed clean home; that home's config/AGENTS.md/skills are NOT loaded"
+    )]
+    pub auth_home: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Use this full Codex home as-is (loads its config, rules, and session storage). Prefer --auth-home for plain account switching"
+    )]
+    pub codex_home: Option<PathBuf>,
 }
 
 impl Default for RuntimeBins {
@@ -494,6 +592,8 @@ impl Default for RuntimeBins {
             claude_bin: "claude".to_string(),
             tmux_bin: "tmux".to_string(),
             log_mode: "summary".to_string(),
+            auth_home: None,
+            codex_home: None,
         }
     }
 }

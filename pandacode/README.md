@@ -3,8 +3,8 @@
 PandaCode is an independent CLI for running coding tasks through multiple agent
 runtimes with one command shape. The first version supports:
 
-- `pandacode codex ...`: Codex through `codexctl session` app-server/control-plane
-  commands.
+- `pandacode codex ...`: Codex directly through `codex app-server` (JSON-RPC
+  over stdio), no external control-plane binary required.
 - `pandacode claude ...`: Claude Code through a real `tmux` session.
 - `pandacode bamboo ...`: Bamboo through its provider-native
   read/search/edit/write/bash coding loop for domestic OpenAI-compatible
@@ -16,9 +16,8 @@ workflow system can call.
 
 By default, task execution uses the strongest production profile:
 
-- Claude: `opus` with `max` effort.
-- Codex: `gpt-5.5` with `xhigh` effort, based on local `codexctl models`
-  support.
+- Claude: `fable` with `xhigh` effort.
+- Codex: `gpt-5.5` with `xhigh` effort.
 - Bamboo: `deepseek` provider with Bamboo's provider default model and
   `high` reasoning effort. Use `--provider`, `--model`, and `--effort` to choose
   another domestic model.
@@ -71,8 +70,8 @@ If a runtime asks for external input, `exec`/`resume` return
 `state: "waiting_for_user"` with `pending_user_input` instead of treating the
 turn as a failure. Use `pandacode <runtime> answer --choice N --wait` or
 `--text ...` to continue the session. Claude answers the visible TUI prompt;
-Codex delegates to `codexctl session answer`; Bamboo maps `answer` to a resume
-turn that passes the selected/text answer back into the same Bamboo run history.
+Codex and Bamboo map `answer` to a resume turn that passes the selected/text
+answer back into the same thread/run history.
 
 The stable high-level states are:
 
@@ -118,6 +117,22 @@ pandacode bamboo exec --provider deepseek --model deepseek-v4-pro --effort high 
 pandacode claude exec - < task.md
 ```
 
+Prompt parts can be appended after the task with a repeatable `--prompt-append`
+flag on `run`, `resume`, and every runtime's `exec`/`resume`:
+
+```bash
+pandacode codex exec --task-file worker.md \
+  --prompt-append builtin:implementation-worker \
+  --prompt-append @spec/runs/V1/worker-packet.md
+pandacode claude exec --task "fix the failing tests" \
+  --prompt-append @prompts/house-rules.md \
+  --prompt-append "text:never edit CI config"
+```
+
+All runtimes resolve prompt parts locally and append them to the task with
+visible separators. `builtin:NAME` role prompts are embedded in the PandaCode
+binary, and `@FILE`, `file:PATH`, and `text:TEXT` read files or literal text.
+
 ## Agent Integration Contract
 
 Future workflow agents should treat `pandacode` as the only public interface.
@@ -148,13 +163,13 @@ one runtime is usable; inspect each runtime's `ok`, `missing`, and
 
 With `--runtime auto`, a known `--model` can select the matching backend:
 domestic model ids such as `kimi-k2.6` select Bamboo and infer their provider,
-Claude aliases such as `opus` select Claude, and `gpt-*` ids select Codex.
+Claude aliases such as `fable` or `opus` select Claude, and `gpt-*` ids select Codex.
 Use `--provider` only when the Bamboo provider cannot be inferred from the
 model id or you want to override the default.
 
-The same command shape applies to Codex and Bamboo. `answer --choice` maps to
-`codexctl session answer --pick`; `logs --visible` remains Claude-only because
-Codex and Bamboo have structured run snapshots rather than a terminal
+The same command shape applies to Codex and Bamboo. `answer --choice` picks
+from the recorded pending question options; `logs --visible` remains Claude-only
+because Codex and Bamboo have structured run snapshots rather than a terminal
 viewport.
 
 For Bamboo domestic-model runs, prefer the top-level command for normal use:
@@ -187,20 +202,46 @@ PandaCode owns the runtime glue internally:
 
 ## Runtime Mapping
 
-Codex uses `codexctl session start/send/execute/read/watch/interrupt/stop/list`.
-`exec` starts the app-server session and then calls `session execute`, because
-`session start` is a Plan-mode turn and PandaCode is meant to be an executor.
-The PandaCode session record stores the Codex `run_id`, `thread_id`, and local
-log paths under `.pandacode/sessions/codex`. Each Codex session gets its own
-control channel: logs are written under `.pandacode/codex/runs/<session>/logs`
-and the codexctl daemon socket is a short per-session temp socket. This keeps
-parallel workflow nodes from sharing one codexctl daemon/run namespace.
-Long task prompts are transported by file reference: PandaCode stores the full
-task under `.pandacode/<runtime>/prompts/` and sends a short instruction telling
-the runtime to read that file. This avoids tmux paste limits and codexctl
-app-server pipe/socket failures while preserving the original task text for
-observability. Codex start also retries transient transport failures with a fresh
-control socket.
+Codex spawns one `codex app-server` process per turn and drives it over stdio
+JSON-RPC: `thread/start` (or `thread/resume`) followed by `turn/start` in
+default collaboration mode, waiting for `turn/completed`. Thread state persists
+as Codex rollout files, so resume works across processes without a daemon. The
+PandaCode session record stores the Codex `thread_id` and `thread_path` under
+`.pandacode/sessions/codex`, and the JSONL protocol traffic is logged to
+`.pandacode/codex/logs/<session>.jsonl`.
+
+Codex turns run with a PandaCode-managed clean Codex home under
+`~/.pandacode/codex-home/<account>`: auth material is copied from the user's
+Codex home, while `config.toml`, `AGENTS.md`, and skills are deliberately left
+out. Switch accounts with `--auth-home ~/.codex-work` (copies that home's auth
+into its own managed directory), or pass `--codex-home DIR` /
+`PANDACODE_CODEX_HOME` to use a full Codex home as-is. Auth material is
+re-copied on every turn, so the managed home tracks the source home's current
+tokens rather than going stale on a one-time snapshot.
+
+`pandacode codex doctor` reports the installed vs. tested codex CLI version
+alongside the account and rate-limit status. PandaCode drives the codex
+app-server JSON-RPC protocol directly, so re-verify after a codex CLI upgrade
+that could change thread/turn methods or event names.
+
+Transient PandaCode outputs (prompts, logs, events, detached worker results)
+accumulate under `.pandacode/`. Run `pandacode gc --days N` (optionally
+`--dry-run`) to prune files older than N days; session records and the Codex
+home are never touched.
+
+`--detach` returns immediately and runs the turn in a background worker that
+keeps the session record fresh (status, last agent message, token usage), so
+`status` doubles as a live watch. While a detached turn waits on
+`item/tool/requestUserInput`, `answer --choice N|--text ...` replies inside the
+same turn through the native structured-answer protocol; `interrupt` aborts the
+active turn through `turn/interrupt`. For synchronous turns the question is
+recorded, `waiting_for_user` is reported, and `answer` continues the thread as
+a fresh turn instead. `--objective` sets a thread goal before the turn starts,
+`logs --visible` reads back the structured thread history (turns and
+messages), and `codex doctor` reports the account and rate-limit status from
+the app-server. Claude task prompts larger than the paste threshold are
+transported by file reference under `.pandacode/<runtime>/prompts/`; Codex
+turns send the full task text directly over stdio.
 
 Claude uses `tmux` to start interactive Claude Code and sends turns into that
 session. Completion is detected with an explicit marker in the visible tmux

@@ -1,6 +1,7 @@
 pub mod bamboo;
 pub mod claude;
 pub mod codex;
+pub(crate) mod codex_appserver;
 
 use std::{env, str::FromStr};
 
@@ -252,7 +253,7 @@ fn bamboo_provider_for_model(model: &str) -> Option<ProviderKind> {
 
 fn is_claude_model_hint(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
-    matches!(model.as_str(), "haiku" | "sonnet" | "opus") || model.starts_with("claude-")
+    matches!(model.as_str(), "haiku" | "sonnet" | "opus" | "fable") || model.starts_with("claude-")
 }
 
 fn is_codex_model_hint(model: &str) -> bool {
@@ -494,6 +495,153 @@ fn join_limited(values: Vec<String>, limit: usize) -> String {
     visible.join(", ")
 }
 
+pub fn wait_sessions(args: crate::cli::WaitCommandArgs) -> Result<()> {
+    let root = crate::io::workspace(&args.cd)?;
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(args.timeout_ms);
+    // Grace window for a freshly-launched lane to write its first record.
+    // After it elapses, a session still missing a record is treated as a
+    // never-started lane (typo'd name / launch failed) and fails fast instead
+    // of silently waiting out the full timeout.
+    let grace = std::time::Duration::from_millis(args.interval_ms.saturating_mul(3).max(10_000));
+    fn terminal(state: &str) -> bool {
+        matches!(
+            state,
+            "completed" | "failed" | "timeout" | "stopped" | "interrupted" | "no_report" | "blocked"
+        )
+    }
+    loop {
+        let mut lanes = serde_json::Map::new();
+        let mut all_settled = true;
+        let mut any_waiting = false;
+        let mut pending_names = Vec::new();
+        for name in &args.sessions {
+            let (runtime, state) = match session::resolve_runtime_for_session(&root, name) {
+                Ok(runtime) => match session::load(&root, &runtime, name) {
+                    Ok(record) => {
+                        let state = record.artifacts["status"]
+                            .as_str()
+                            .unwrap_or("unknown")
+                            .to_string();
+                        (runtime, state)
+                    }
+                    Err(_) => (runtime, "pending".to_string()),
+                },
+                Err(_) => ("unknown".to_string(), "pending".to_string()),
+            };
+            if state == "pending" {
+                pending_names.push(name.clone());
+            }
+            if state == "waiting_for_user" {
+                any_waiting = true;
+            } else if !terminal(&state) {
+                all_settled = false;
+            }
+            lanes.insert(
+                name.clone(),
+                serde_json::json!({ "runtime": runtime, "state": state }),
+            );
+        }
+        // Fast-fail: a lane that never produced a record after the grace window.
+        if !pending_names.is_empty() && started.elapsed() >= grace {
+            crate::io::output_json(&serde_json::json!({
+                "ok": false,
+                "action": "wait",
+                "state": "missing_session",
+                "sessions": lanes,
+                "missing_sessions": pending_names,
+                "error": "session(s) never started a turn; check the session name(s)",
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            }))?;
+            return Err(crate::io::JsonAlreadyEmitted.into());
+        }
+        let timed_out = std::time::Instant::now() >= deadline;
+        if all_settled || any_waiting || timed_out {
+            let missing = args
+                .expect_artifact
+                .iter()
+                .filter(|path| !root.join(path).exists())
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let all_completed = lanes.values().all(|lane| lane["state"] == "completed");
+            let ok = all_completed && missing.is_empty() && !any_waiting;
+            let state = if ok {
+                "completed"
+            } else if any_waiting {
+                "waiting_for_user"
+            } else if timed_out && !all_settled {
+                "timeout"
+            } else if all_completed && !missing.is_empty() {
+                "no_report"
+            } else {
+                "failed"
+            };
+            crate::io::output_json(&serde_json::json!({
+                "ok": ok,
+                "action": "wait",
+                "state": state,
+                "sessions": lanes,
+                "missing_artifacts": missing,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            }))?;
+            if ok {
+                return Ok(());
+            }
+            return Err(crate::io::JsonAlreadyEmitted.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(args.interval_ms));
+    }
+}
+
+pub fn gc_sessions(args: crate::cli::GcCommandArgs) -> Result<()> {
+    let root = crate::io::workspace(&args.cd)?;
+    let base = crate::io::pandacode_dir(&root);
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(args.days.saturating_mul(86_400)))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    // Only PandaCode-owned transient outputs. Never touch `sessions/` (state),
+    // `codex/codex-home` (thread history), or `codex/appserver-pids`.
+    let prunable = ["prompts", "logs", "events", "detached"];
+    let mut removed = Vec::new();
+    let mut bytes_freed: u64 = 0;
+    for runtime in ["codex", "claude", "bamboo"] {
+        for sub in prunable {
+            let dir = base.join(runtime).join(sub);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_file() {
+                    continue;
+                }
+                let old = meta
+                    .modified()
+                    .map(|m| m < cutoff)
+                    .unwrap_or(false);
+                if !old {
+                    continue;
+                }
+                bytes_freed += meta.len();
+                removed.push(path.to_string_lossy().to_string());
+                if !args.dry_run {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+    crate::io::output_json(&serde_json::json!({
+        "ok": true,
+        "action": "gc",
+        "dry_run": args.dry_run,
+        "days": args.days,
+        "removed_count": removed.len(),
+        "bytes_freed": bytes_freed,
+        "removed": removed,
+    }))
+}
+
 fn version_report(program: &str, args: &[&str]) -> serde_json::Value {
     let command = std::iter::once(program.to_string())
         .chain(args.iter().map(|arg| arg.to_string()))
@@ -535,6 +683,10 @@ mod tests {
         );
         assert_eq!(
             runtime_hint_for_model("opus"),
+            Some(ResolvedRuntime::Claude)
+        );
+        assert_eq!(
+            runtime_hint_for_model("fable"),
             Some(ResolvedRuntime::Claude)
         );
         assert_eq!(
@@ -584,7 +736,7 @@ mod tests {
             "codex": {
                 "ok": true,
                 "state": "available",
-                "driver": "codexctl session",
+                "driver": "codex app-server",
                 "missing": []
             }
         }));
@@ -622,7 +774,7 @@ mod tests {
             },
             "claude": {
                 "ok": true,
-                "known_aliases": ["haiku", "sonnet", "opus"]
+                "known_aliases": ["haiku", "sonnet", "opus", "fable"]
             },
             "codex": {
                 "ok": true,
@@ -643,7 +795,7 @@ mod tests {
 
         assert!(summary.contains("bamboo: ok models=2"));
         assert!(summary.contains("defaults=deepseek/deepseek-v4-pro, kimi/kimi-k2.6"));
-        assert!(summary.contains("claude: ok aliases=haiku, sonnet, opus"));
+        assert!(summary.contains("claude: ok aliases=haiku, sonnet, opus, fable"));
         assert!(summary.contains("codex: ok models=2 default=gpt-5.5"));
         assert!(summary.contains("JSON: pandacode models --json"));
         assert!(!summary.contains('{'));

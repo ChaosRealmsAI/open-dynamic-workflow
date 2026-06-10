@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::{
@@ -23,8 +23,8 @@ use crate::{
 };
 
 const RUNTIME: &str = "claude";
-const DEFAULT_MODEL: &str = "opus";
-const DEFAULT_EFFORT: &str = "max";
+const DEFAULT_MODEL: &str = "fable";
+const DEFAULT_EFFORT: &str = "xhigh";
 
 struct ClaudeLaunch<'a> {
     tmux_name: &'a str,
@@ -79,6 +79,7 @@ pub fn record_hook(args: ClaudeHookArgs) -> Result<()> {
 }
 
 fn exec(args: TaskCommandArgs) -> Result<()> {
+    reject_codex_only_flags(&args)?;
     let root = workspace(&args.cd)?;
     let task = crate::io::read_task(
         args.task.as_deref(),
@@ -86,6 +87,7 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
         args.stdin.as_deref(),
         Some(&root),
     )?;
+    let task = crate::io::apply_prompt_parts(&task, &args.prompt_append, Some(&root))?;
     let session_name = if args.session == "latest" {
         generated_session(RUNTIME)
     } else {
@@ -94,6 +96,30 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
     let model = effective_model(args.model.as_deref(), None);
     let effort = effective_effort(args.effort, None);
     let permission = effective_permission(args.permission, None);
+    if args.detach {
+        return spawn_detached_claude_worker(
+            "exec",
+            &root,
+            &session_name,
+            &task,
+            &args,
+            &model,
+            &effort,
+            permission,
+        );
+    }
+    let mut pre_record = SessionRecord::new(RUNTIME, &session_name, "claude-tmux", &root);
+    pre_record.tmux_name = Some(session_name.clone());
+    pre_record.model = Some(model.clone());
+    pre_record.effort = Some(effort.clone());
+    pre_record.permission = Some(permission.as_value().to_string());
+    pre_record.artifacts = json!({
+        "status": "running",
+        "runner_pid": std::process::id(),
+        "detached": crate::io::detached_worker(),
+        "expected_artifacts": args.expect_artifact,
+    });
+    session::save(&root, &mut pre_record)?;
     ensure_started(
         &root,
         &session_name,
@@ -120,7 +146,7 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
             &marker,
             Some(&event_log_path(&root, &session_name)),
             turn_started,
-            args.timeout_ms.unwrap_or(120_000),
+            args.timeout_ms.unwrap_or_else(default_wait_timeout_ms),
         )?;
 
         let mut record = SessionRecord::new(RUNTIME, &session_name, "claude-tmux", &root);
@@ -129,12 +155,24 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
         record.model = Some(model);
         record.effort = Some(effort);
         record.permission = Some(permission.as_value().to_string());
+        let missing = crate::io::missing_artifacts(&root, &json!(args.expect_artifact));
+        let mut state = wait["status"].clone();
+        let mut ok_value = wait["ok"].clone();
+        if state == "completed" && !missing.is_empty() {
+            state = json!("no_report");
+            ok_value = json!(false);
+        }
         record.artifacts = json!({
             "prompt_file": prompt_file,
             "transport": if dispatch_task.is_some() { "file_reference" } else { "direct" },
             "debug_log": debug_log_path(&root, &session_name),
             "event_log": event_log_path(&root, &session_name),
-            "tmux_session": session_name
+            "tmux_session": session_name,
+            "status": state,
+            "runner_pid": std::process::id(),
+            "detached": crate::io::detached_worker(),
+            "expected_artifacts": args.expect_artifact,
+            "missing_artifacts": missing,
         });
         if wait["status"] == "waiting_for_user" {
             record.artifacts["pending_marker"] = json!(marker);
@@ -155,8 +193,8 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
             &marker,
         );
         Ok(json!({
-            "ok": wait["ok"],
-            "state": wait["status"],
+            "ok": ok_value,
+            "state": record.artifacts["status"].clone(),
             "runtime": RUNTIME,
             "action": "exec",
             "session": record.session,
@@ -205,6 +243,7 @@ impl Drop for StartedSessionGuard<'_> {
 }
 
 fn resume(args: TaskCommandArgs) -> Result<()> {
+    reject_codex_only_flags(&args)?;
     let root = workspace(&args.cd)?;
     let task = crate::io::read_task(
         args.task.as_deref(),
@@ -212,6 +251,7 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         args.stdin.as_deref(),
         Some(&root),
     )?;
+    let task = crate::io::apply_prompt_parts(&task, &args.prompt_append, Some(&root))?;
     let mut record = session::load(&root, RUNTIME, &args.session)?;
     let tmux = record
         .tmux_name
@@ -220,6 +260,23 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
     let model = effective_model(args.model.as_deref(), record.model.as_deref());
     let effort = effective_effort(args.effort, record.effort.as_deref());
     let permission = effective_permission(args.permission, record.permission.as_deref());
+    if args.detach {
+        let session_name = record.session.clone();
+        return spawn_detached_claude_worker(
+            "resume",
+            &root,
+            &session_name,
+            &task,
+            &args,
+            &model,
+            &effort,
+            permission,
+        );
+    }
+    record.artifacts["status"] = json!("running");
+    record.artifacts["runner_pid"] = json!(std::process::id());
+    record.artifacts["detached"] = json!(crate::io::detached_worker());
+    session::save(&root, &mut record)?;
     if tmux_has_session(&args.bins.tmux_bin, &tmux)?
         && args.permission.is_some()
         && permission != PermissionMode::from_record(record.permission.as_deref())
@@ -262,7 +319,7 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         &marker,
         Some(&event_log_path(&root, &tmux)),
         turn_started,
-        args.timeout_ms.unwrap_or(120_000),
+        args.timeout_ms.unwrap_or_else(default_wait_timeout_ms),
     )?;
     fill_claude_session_from_events(&root, &tmux, &mut record);
     record.model = Some(model);
@@ -275,6 +332,15 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         "direct"
     });
     record.artifacts["event_log"] = json!(event_log_path(&root, &tmux));
+    let missing = crate::io::missing_artifacts(&root, &json!(args.expect_artifact));
+    let mut resume_state = wait["status"].clone();
+    let mut resume_ok = wait["ok"].clone();
+    if resume_state == "completed" && !missing.is_empty() {
+        resume_state = json!("no_report");
+        resume_ok = json!(false);
+    }
+    record.artifacts["status"] = resume_state.clone();
+    record.artifacts["missing_artifacts"] = json!(missing);
     if wait["status"] == "waiting_for_user" {
         record.artifacts["pending_marker"] = json!(marker);
     } else if let Some(object) = record.artifacts.as_object_mut() {
@@ -296,8 +362,8 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         &marker,
     );
     let report = json!({
-        "ok": wait["ok"],
-        "state": wait["status"],
+        "ok": resume_ok,
+        "state": resume_state,
         "runtime": RUNTIME,
         "action": "resume",
         "session": record.session,
@@ -378,7 +444,7 @@ fn answer(args: AnswerCommandArgs) -> Result<()> {
                 marker,
                 Some(&event_log_path(&root, &tmux)),
                 answer_started,
-                args.timeout_ms.unwrap_or(120_000),
+                args.timeout_ms.unwrap_or_else(default_wait_timeout_ms),
             )?)
         } else {
             None
@@ -433,10 +499,19 @@ fn status(args: SessionCommandArgs) -> Result<()> {
         None
     };
     let event_log = event_log_path(&root, tmux);
-    let state = claude_state(&event_log, visible.as_deref(), alive);
+    let live_state = claude_state(&event_log, visible.as_deref(), alive);
+    // Top-level `state` mirrors the recorded execution outcome so it matches
+    // codex status and `pandacode wait`; the real-time tmux view is `live_state`.
+    let state = record
+        .artifacts
+        .get("status")
+        .and_then(|value| value.as_str())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| live_state.clone());
     output_json(&json!({
-        "ok": true,
+        "ok": state == "completed" || state == "idle",
         "state": state,
+        "live_state": live_state,
         "runtime": RUNTIME,
         "action": "status",
         "session": record.session,
@@ -589,6 +664,7 @@ pub fn doctor_report(root: &Path, bins: &RuntimeBins) -> Result<serde_json::Valu
             "task_execution": true,
             "resume": true,
             "answer": true,
+            "detach": true,
             "interrupt": true,
             "stop": true,
             "model": true,
@@ -625,7 +701,7 @@ pub fn models_report(root: &Path, bins: &RuntimeBins) -> Result<serde_json::Valu
             "auto_compact": false,
             "verify_commands": false
         },
-        "known_aliases": ["haiku", "sonnet", "opus"],
+        "known_aliases": ["haiku", "sonnet", "opus", "fable"],
         "note": "Claude accepts aliases or full model ids through --model; use Claude Code UI for account-specific availability.",
         "help_tail": tail(&output.stdout, 40),
         "stderr_tail": tail(&output.stderr, 20)
@@ -703,6 +779,97 @@ fn claude_command(bins: &RuntimeBins, launch: &ClaudeLaunch<'_>) -> Vec<String> 
     command.extend(["--model".to_string(), launch.model.to_string()]);
     command.extend(["--effort".to_string(), launch.effort.to_string()]);
     command
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_detached_claude_worker(
+    action: &str,
+    root: &Path,
+    session: &str,
+    task: &str,
+    args: &TaskCommandArgs,
+    model: &str,
+    effort: &str,
+    permission: PermissionMode,
+) -> Result<()> {
+    let task_file = write_prompt_file(root, RUNTIME, &format!("{session}-detach"), task)?;
+    // Pre-write a starting record so `pandacode wait`/status see the lane
+    // immediately, before the background worker has launched its tmux session.
+    let mut pre = SessionRecord::new(RUNTIME, session, "claude-tmux", root);
+    pre.tmux_name = Some(session.to_string());
+    pre.model = Some(model.to_string());
+    pre.effort = Some(effort.to_string());
+    pre.permission = Some(permission.as_value().to_string());
+    pre.artifacts = json!({
+        "status": "starting",
+        "detached": true,
+        "expected_artifacts": args.expect_artifact,
+    });
+    session::save(root, &mut pre)?;
+    let out_dir = pandacode_dir(root).join(RUNTIME).join("detached");
+    fs::create_dir_all(&out_dir)?;
+    let result_file = out_dir.join(format!("{session}.json"));
+    let stdout = fs::File::create(&result_file)?;
+    let stderr = stdout.try_clone()?;
+    let exe = std::env::current_exe()?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("claude")
+        .arg(action)
+        .args(["--session", session])
+        .args(["--task-file", &task_file.to_string_lossy()])
+        .args(["--cd", &root.to_string_lossy()])
+        .args(["--model", model])
+        .args(["--effort", effort])
+        .args(["--permission", permission.as_value()])
+        .args(["--claude-bin", &args.bins.claude_bin])
+        .args(["--tmux-bin", &args.bins.tmux_bin])
+        .args(["--log-mode", &args.bins.log_mode])
+        .arg("--json")
+        .env(crate::io::DETACHED_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
+    if let Some(timeout) = args.timeout_ms {
+        command.args(["--timeout-ms", &timeout.to_string()]);
+    }
+    for artifact in &args.expect_artifact {
+        command.args(["--expect-artifact", &artifact.to_string_lossy()]);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let child = command
+        .spawn()
+        .context("spawn detached claude worker")?;
+    output_json(&json!({
+        "ok": true,
+        "state": "running",
+        "runtime": RUNTIME,
+        "action": action,
+        "session": session,
+        "detached": true,
+        "worker_pid": child.id(),
+        "result_file": result_file,
+        "note": "turn runs in a detached worker; poll `pandacode claude status` or block with `pandacode wait`",
+    }))
+}
+
+fn reject_codex_only_flags(args: &TaskCommandArgs) -> Result<()> {
+    if args.objective.is_some() {
+        bail!("--objective is only supported on the codex runtime");
+    }
+    Ok(())
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    if crate::io::detached_worker() {
+        1_800_000
+    } else {
+        120_000
+    }
 }
 
 fn effective_model(explicit: Option<&str>, stored: Option<&str>) -> String {
@@ -1285,6 +1452,8 @@ mod tests {
             claude_bin: "claude".to_string(),
             tmux_bin: "tmux".to_string(),
             log_mode: "summary".to_string(),
+            auth_home: None,
+            codex_home: None,
         }
     }
 
@@ -1294,6 +1463,10 @@ mod tests {
             stdin: None,
             task: Some("fix".to_string()),
             task_file: None,
+            prompt_append: Vec::new(),
+            detach: false,
+            expect_artifact: Vec::new(),
+            objective: None,
             cd: PathBuf::from("/repo"),
             session: "latest".to_string(),
             model: Some("sonnet".to_string()),
@@ -1339,6 +1512,10 @@ mod tests {
             stdin: None,
             task: Some("fix".to_string()),
             task_file: None,
+            prompt_append: Vec::new(),
+            detach: false,
+            expect_artifact: Vec::new(),
+            objective: None,
             cd: PathBuf::from("/repo"),
             session: "latest".to_string(),
             model: Some("sonnet".to_string()),

@@ -24,6 +24,28 @@ impl std::fmt::Display for JsonAlreadyEmitted {
 
 impl std::error::Error for JsonAlreadyEmitted {}
 
+pub const DETACHED_ENV: &str = "PANDACODE_DETACHED";
+
+pub fn detached_worker() -> bool {
+    std::env::var_os(DETACHED_ENV).is_some()
+}
+
+/// Expected report artifacts (relative to the workspace root) that are still
+/// missing. Used to turn a `completed` turn into `no_report`.
+pub fn missing_artifacts(root: &Path, expected: &serde_json::Value) -> Vec<String> {
+    expected
+        .as_array()
+        .map(|paths| {
+            paths
+                .iter()
+                .filter_map(|path| path.as_str())
+                .filter(|path| !root.join(path).exists())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -104,6 +126,106 @@ fn read_task_file(path: &Path, workspace_root: Option<&Path>) -> Result<String> 
             Err(original_error).with_context(|| format!("read task file {}", path.display()))
         }
     }
+}
+
+pub fn apply_prompt_parts(
+    task: &str,
+    parts: &[String],
+    workspace_root: Option<&Path>,
+) -> Result<String> {
+    if parts.is_empty() {
+        return Ok(task.to_string());
+    }
+    let mut combined = task.trim_end().to_string();
+    for (index, part) in parts.iter().enumerate() {
+        let resolved = resolve_local_prompt_part(part, workspace_root)
+            .with_context(|| format!("resolve --prompt-append part {}", index + 1))?;
+        combined.push_str("\n\n----- appended prompt part ");
+        combined.push_str(&(index + 1).to_string());
+        combined.push_str(" -----\n\n");
+        combined.push_str(resolved.trim_end());
+    }
+    Ok(combined)
+}
+
+pub const BUILTIN_PROMPTS: &[(&str, &str)] = &[
+    (
+        "orchestrator-base",
+        include_str!("../prompts/builtin/orchestrator-base.md"),
+    ),
+    (
+        "version-advisor",
+        include_str!("../prompts/builtin/version-advisor.md"),
+    ),
+    (
+        "bdd-spec-designer",
+        include_str!("../prompts/builtin/bdd-spec-designer.md"),
+    ),
+    (
+        "tech-architect",
+        include_str!("../prompts/builtin/tech-architect.md"),
+    ),
+    (
+        "product-ux-taste-designer",
+        include_str!("../prompts/builtin/product-ux-taste-designer.md"),
+    ),
+    (
+        "codebase-governance",
+        include_str!("../prompts/builtin/codebase-governance.md"),
+    ),
+    (
+        "research-trigger",
+        include_str!("../prompts/builtin/research-trigger.md"),
+    ),
+    (
+        "implementation-worker",
+        include_str!("../prompts/builtin/implementation-worker.md"),
+    ),
+    ("worker-card", include_str!("../prompts/builtin/worker-card.md")),
+    (
+        "harness-verifier",
+        include_str!("../prompts/builtin/harness-verifier.md"),
+    ),
+    (
+        "reviewer-red-team",
+        include_str!("../prompts/builtin/reviewer-red-team.md"),
+    ),
+    ("fresh-judge", include_str!("../prompts/builtin/fresh-judge.md")),
+    (
+        "release-devlog-keeper",
+        include_str!("../prompts/builtin/release-devlog-keeper.md"),
+    ),
+];
+
+fn builtin_prompt(name: &str) -> Result<String> {
+    if let Some((_, text)) = BUILTIN_PROMPTS.iter().find(|(key, _)| *key == name) {
+        return Ok((*text).to_string());
+    }
+    let known = BUILTIN_PROMPTS
+        .iter()
+        .map(|(key, _)| *key)
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!("unknown builtin prompt part {name}; known builtins: {known}")
+}
+
+fn resolve_local_prompt_part(part: &str, workspace_root: Option<&Path>) -> Result<String> {
+    if let Some(name) = part
+        .strip_prefix("builtin:")
+        .or_else(|| part.strip_prefix("@builtin:"))
+    {
+        return builtin_prompt(name);
+    }
+    if let Some(path) = part.strip_prefix("file:") {
+        return read_task_file(Path::new(path), workspace_root);
+    }
+    if let Some(path) = part.strip_prefix('@') {
+        return read_task_file(Path::new(path), workspace_root);
+    }
+    if let Some(text) = part.strip_prefix("text:") {
+        return Ok(text.to_string());
+    }
+    Ok(part.to_string())
 }
 
 pub fn write_prompt_file(root: &Path, runtime: &str, session: &str, task: &str) -> Result<PathBuf> {
@@ -205,10 +327,6 @@ pub fn command_report(
         "stderr": output.stderr,
         "raw": raw
     })
-}
-
-pub fn parse_json_or_null(text: &str) -> Option<serde_json::Value> {
-    serde_json::from_str::<serde_json::Value>(text.trim()).ok()
 }
 
 pub fn tail(text: &str, lines: usize) -> String {
@@ -386,6 +504,55 @@ mod tests {
     #[test]
     fn strips_ansi_controls() {
         assert_eq!(strip_ansi_controls("\u{1b}[31mred\u{1b}[0m"), "red");
+    }
+
+    #[test]
+    fn prompt_parts_append_in_order_with_separators() {
+        let parts = vec!["literal advice".to_string(), "text:builtin: looks literal".to_string()];
+        let combined = apply_prompt_parts("do the task", &parts, None).unwrap();
+        assert!(combined.starts_with("do the task"));
+        let first = combined.find("----- appended prompt part 1 -----").unwrap();
+        let second = combined.find("----- appended prompt part 2 -----").unwrap();
+        assert!(first < second);
+        assert!(combined.contains("literal advice"));
+        assert!(combined.contains("builtin: looks literal"));
+    }
+
+    #[test]
+    fn prompt_parts_empty_keeps_task_unchanged() {
+        assert_eq!(
+            apply_prompt_parts("task text", &[], None).unwrap(),
+            "task text"
+        );
+    }
+
+    #[test]
+    fn prompt_parts_read_files_and_resolve_builtins() {
+        let root = std::env::temp_dir().join(format!(
+            "pandacode-prompt-part-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("role.md"), "be careful").unwrap();
+        let at_form = apply_prompt_parts("t", &["@role.md".to_string()], Some(&root)).unwrap();
+        assert!(at_form.contains("be careful"));
+        let file_form =
+            apply_prompt_parts("t", &["file:role.md".to_string()], Some(&root)).unwrap();
+        assert!(file_form.contains("be careful"));
+        let builtin = apply_prompt_parts(
+            "t",
+            &["builtin:implementation-worker".to_string()],
+            Some(&root),
+        )
+        .unwrap();
+        assert!(builtin.len() > "t".len() + 50);
+        let builtin_at =
+            apply_prompt_parts("t", &["@builtin:fresh-judge".to_string()], Some(&root)).unwrap();
+        assert!(builtin_at.len() > "t".len() + 50);
+        let unknown = apply_prompt_parts("t", &["builtin:not-a-role".to_string()], Some(&root));
+        assert!(unknown.is_err());
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

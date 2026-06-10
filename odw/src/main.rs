@@ -27,6 +27,7 @@ odw doctor                       # check pandacode + runtimes are wired up\n  \
 odw exec --script wf.js --backend mock --json    # token-free dry run\n  \
 odw exec --script wf.js --backend pandacode      # real run\n  \
 odw report --script wf.js --open                 # HTML execution-graph preview\n  \
+odw starter parallel-review-apply > wf.js        # built-in large-project starter\n  \
 odw runs show latest                             # inspect a run's journal\n  \
 odw spec | odw contract | odw capabilities       # machine-readable API + contract\n\n\
 Start with `odw guide`. Everything an agent needs is in the CLI — nothing to scaffold."
@@ -44,8 +45,6 @@ enum Commands {
         path: PathBuf,
         #[arg(long, default_value = "claude")]
         claude_bin: String,
-        #[arg(long, default_value = "codexctl")]
-        codexctl_bin: String,
         #[arg(long, env = "ODW_PANDACODE_BIN", default_value = "pandacode")]
         pandacode_bin: String,
         #[arg(long, help = "Print the full machine-readable doctor report")]
@@ -57,8 +56,12 @@ enum Commands {
     Capabilities,
     #[command(about = "Print the Open Dynamic Workflow framework spec")]
     Spec,
-    #[command(about = "Print the self-contained agent usage guide (what odw is, how to author + run)")]
+    #[command(
+        about = "Print the self-contained agent usage guide (what odw is, how to author + run)"
+    )]
     Guide,
+    #[command(about = "Print a built-in starter workflow script")]
+    Starter(StarterArgs),
     #[command(subcommand, about = "Inspect ODW run journals and live logs")]
     Runs(RunsCommand),
     #[command(about = "Execute an ODW JavaScript workflow script directly")]
@@ -98,8 +101,6 @@ struct ExecArgs {
     /// floor this at 600s so real coding isn't truncated.
     #[arg(long, default_value = "120")]
     timeout: String,
-    #[arg(long, env = "ODW_CODEXCTL_BIN", default_value = "codexctl")]
-    codexctl_bin: String,
     #[arg(long, env = "ODW_PANDACODE_BIN", default_value = "pandacode")]
     pandacode_bin: String,
     #[arg(long, help = "Print only the final workflow result as one JSON object")]
@@ -112,11 +113,21 @@ struct ExecArgs {
     dry_run: bool,
 }
 
+#[derive(Debug, clap::Args)]
+struct StarterArgs {
+    #[arg(default_value = "parallel-review-apply")]
+    name: String,
+    #[arg(long, help = "List available built-in starter workflow names")]
+    list: bool,
+}
+
 #[derive(Debug, Subcommand)]
 enum RunsCommand {
     List {
         #[arg(long, default_value = ".")]
         path: PathBuf,
+        #[arg(long, help = "Print the raw JSON run list")]
+        json: bool,
     },
     Show {
         #[arg(default_value = "latest")]
@@ -128,17 +139,15 @@ enum RunsCommand {
     },
 }
 
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Doctor {
             path,
             claude_bin,
-            codexctl_bin,
             pandacode_bin,
             json,
-        } => doctor(&path, &claude_bin, &codexctl_bin, &pandacode_bin, json),
+        } => doctor(&path, &claude_bin, &pandacode_bin, json),
         Commands::Contract => {
             println!("{}", contract_text());
             Ok(())
@@ -155,8 +164,9 @@ fn main() -> Result<()> {
             print!("{}", include_str!("guide.md"));
             Ok(())
         }
+        Commands::Starter(args) => starter(args),
         Commands::Runs(command) => match command {
-            RunsCommand::List { path } => runs_list(&path),
+            RunsCommand::List { path, json } => runs_list(&path, json),
             RunsCommand::Show { run_id, path, tail } => runs_show(&path, &run_id, tail),
         },
         Commands::Exec(args) => exec_script(*args),
@@ -167,12 +177,11 @@ fn main() -> Result<()> {
 fn doctor(
     root: &Path,
     claude_bin: &str,
-    codexctl_bin: &str,
     pandacode_bin: &str,
     json_output: bool,
 ) -> Result<()> {
     let pandacode_bin = &resolved_pandacode_bin(pandacode_bin);
-    let report = doctor_report(root, claude_bin, codexctl_bin, pandacode_bin)?;
+    let report = doctor_report(root, claude_bin, pandacode_bin)?;
     let ok = report
         .get("ok")
         .and_then(|value| value.as_bool())
@@ -188,14 +197,46 @@ fn doctor(
     Ok(())
 }
 
+const PARALLEL_REVIEW_APPLY_STARTER: &str = include_str!("../examples/07-parallel-review-apply.js");
+
+fn starter(args: StarterArgs) -> Result<()> {
+    let starters = [(
+        "parallel-review-apply",
+        "parallel Codex worktrees -> candidate review gate -> targeted repair/re-review -> approve-only atomic landing -> read-only verification guard",
+        PARALLEL_REVIEW_APPLY_STARTER,
+    )];
+    if args.list {
+        for (name, description, _) in starters {
+            println!("{name}\t{description}");
+        }
+        return Ok(());
+    }
+    let Some((_, _, template)) = starters
+        .iter()
+        .find(|(name, _, _)| *name == args.name.as_str())
+    else {
+        let names = starters
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
+            "unknown starter workflow: {}. Available starters: {}",
+            args.name,
+            names
+        );
+    };
+    print!("{template}");
+    Ok(())
+}
+
 fn doctor_report(
     root: &Path,
     claude_bin: &str,
-    codexctl_bin: &str,
     pandacode_bin: &str,
 ) -> Result<serde_json::Value> {
     let root = normalize_root(root)?;
-    // `pandacode` is the one executor odw actually requires. claude/codexctl are
+    // `pandacode` is the one executor odw actually requires. claude/codex are
     // PandaCode's concern (it owns the runtimes + their mechanics), so they are
     // reported for information but do not gate odw's own health.
     // odw's script runtime runs on node; without it no workflow can execute, so
@@ -203,10 +244,13 @@ fn doctor_report(
     let node = run_version("node", &["--version"]);
     let pandacode = run_version(pandacode_bin, &["--version"]);
     let claude = run_version(claude_bin, &["--version"]);
-    let codexctl = run_version(codexctl_bin, &["--help"]);
-    let codex = run_codex_status(codexctl_bin);
     let bamboo_keys = bamboo_key_report();
     let runtimes = run_pandacode_doctor_report(pandacode_bin, &root);
+    // codex health comes from pandacode's own codex app-server doctor.
+    let codex = runtimes
+        .get("codex")
+        .cloned()
+        .unwrap_or_else(|| json!({ "ok": false, "summary": "pandacode codex doctor unavailable" }));
     Ok(json!({
         "ok": node.ok && pandacode.ok,
         "odw_version": ODW_VERSION,
@@ -215,7 +259,6 @@ fn doctor_report(
         "pandacode": pandacode,
         "runtimes": runtimes,
         "claude": claude,
-        "codexctl": codexctl,
         "codex": codex,
         "bamboo_keys": bamboo_keys,
         "decision": "odw is zero-install: no project files to scaffold. It dispatches each node to `pandacode <runtime> exec`, so it requires only Node.js + the pandacode binary. PandaCode owns the codex/claude/bamboo runtimes."
@@ -277,16 +320,11 @@ fn render_doctor_human(report: &serde_json::Value) -> String {
         "{} codex: {}",
         icon(codex_ok),
         if codex_ok {
-            "logged in / quota check passed".to_string()
-        } else if value_ok(&report["codexctl"]) {
-            format!(
-                "codexctl exists, but login/quota check failed ({}) - run `codexctl status`, sign in, or refresh quota",
-                value_summary(&report["codex"])
-            )
+            "available via pandacode (codex app-server)".to_string()
         } else {
             format!(
-                "codexctl not runnable ({}) - install codexctl or set --codexctl-bin",
-                value_summary(&report["codexctl"])
+                "not ready ({}) - check `pandacode codex doctor` (codex login/quota)",
+                value_summary(&report["codex"])
             )
         }
     ));
@@ -389,60 +427,6 @@ fn bamboo_ready_count(value: &serde_json::Value) -> usize {
     map.values().filter(|item| value_ok(item)).count()
 }
 
-fn run_codex_status(codexctl_bin: &str) -> serde_json::Value {
-    let checks: &[&[&str]] = &[&["status"], &["account"], &["quota"]];
-    let mut failures = Vec::new();
-    for args in checks {
-        let status = run_command_status(codexctl_bin, args);
-        if status.ok {
-            return json!({
-                "ok": true,
-                "command": command_display(codexctl_bin, args),
-                "summary": status.summary
-            });
-        }
-        failures.push(format!(
-            "{}: {}",
-            command_display(codexctl_bin, args),
-            status.summary
-        ));
-    }
-    json!({
-        "ok": false,
-        "command": codexctl_bin,
-        "summary": failures.join("; ")
-    })
-}
-
-fn run_command_status(command: &str, args: &[&str]) -> ToolStatus {
-    match Command::new(command).args(args).output() {
-        Ok(output) => {
-            let text = if output.stdout.is_empty() {
-                String::from_utf8_lossy(&output.stderr).to_string()
-            } else {
-                String::from_utf8_lossy(&output.stdout).to_string()
-            };
-            ToolStatus {
-                ok: output.status.success(),
-                command: command_display(command, args),
-                summary: text.lines().next().unwrap_or("").to_string(),
-            }
-        }
-        Err(error) => ToolStatus {
-            ok: false,
-            command: command_display(command, args),
-            summary: error.to_string(),
-        },
-    }
-}
-
-fn command_display(command: &str, args: &[&str]) -> String {
-    std::iter::once(command)
-        .chain(args.iter().copied())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 const BAMBOO_PROVIDERS: &[(&str, &str)] = &[
     ("deepseek", "DEEPSEEK_API_KEY"),
     ("kimi", "KIMI_API_KEY"),
@@ -525,11 +509,13 @@ fn run_pandacode_doctor_report(pandacode_bin: &str, root: &Path) -> serde_json::
     }
 }
 
-fn runs_list(root: &Path) -> Result<()> {
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&runs_list_report(root)?)?
-    );
+fn runs_list(root: &Path, json_output: bool) -> Result<()> {
+    let report = runs_list_report(root)?;
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("{}", format_runs_list_view(&report));
+    }
     Ok(())
 }
 
@@ -547,10 +533,91 @@ fn runs_list_report(root: &Path) -> Result<serde_json::Value> {
             }
         }
     }
+    runs.sort_by_key(|value| std::cmp::Reverse(run_list_sort_key(value)));
     Ok(json!({
         "runs_dir": runs_dir,
         "runs": runs
     }))
+}
+
+fn run_list_sort_key(value: &serde_json::Value) -> (u64, String) {
+    let run_id = value
+        .get("run_id")
+        .and_then(|item| item.as_str())
+        .unwrap_or("")
+        .to_string();
+    let started_ms = value
+        .get("started_ms")
+        .and_then(|item| item.as_u64())
+        .or_else(|| run_id_started_ms(&run_id))
+        .unwrap_or(0);
+    (started_ms, run_id)
+}
+
+fn format_runs_list_view(report: &serde_json::Value) -> String {
+    let runs_dir = json_string(report, "runs_dir").unwrap_or_else(|| ".odw/runs".to_string());
+    let runs = report
+        .get("runs")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut lines = vec![format!("Runs in {runs_dir}")];
+    if runs.is_empty() {
+        lines.push("  (none)".to_string());
+        lines.push("Start one: odw exec --script <workflow.js> --input <json>".to_string());
+        return lines.join("\n");
+    }
+    for run in runs.iter().take(20) {
+        let run_id = json_string(run, "run_id").unwrap_or_else(|| "unknown".to_string());
+        let status = json_string(run, "status").unwrap_or_else(|| "unknown".to_string());
+        let workflow = json_string(run, "workflow")
+            .as_deref()
+            .map(short_workflow_label)
+            .unwrap_or_else(|| "-".to_string());
+        let duration = format_run_duration(run);
+        lines.push(format!(
+            "  - {run_id} [{status}] duration={duration} workflow={workflow}"
+        ));
+    }
+    if runs.len() > 20 {
+        lines.push(format!("  ... {} more run(s)", runs.len() - 20));
+    }
+    lines.push("Show: odw runs show <run_id|latest>".to_string());
+    lines.push("JSON: odw runs list --json".to_string());
+    lines.join("\n")
+}
+
+fn short_workflow_label(path: &str) -> String {
+    let candidate = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    if candidate.is_empty() {
+        "-".to_string()
+    } else {
+        candidate.to_string()
+    }
+}
+
+fn format_run_duration(run: &serde_json::Value) -> String {
+    let started = run.get("started_ms").and_then(|value| value.as_u64());
+    let finished = run.get("finished_ms").and_then(|value| value.as_u64());
+    match (started, finished) {
+        (Some(started), Some(finished)) if finished >= started => {
+            format!("{}ms", finished - started)
+        }
+        (Some(_), _) => "running".to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+fn run_id_started_ms(run_id: &str) -> Option<u64> {
+    run_id
+        .strip_prefix("odw-exec-")?
+        .split('-')
+        .next()?
+        .parse::<u64>()
+        .ok()
 }
 
 fn runs_show(root: &Path, run_id: &str, tail: usize) -> Result<()> {
@@ -568,9 +635,11 @@ fn runs_show_report(root: &Path, run_id: &str, tail: usize) -> Result<serde_json
         .unwrap_or_else(|| json!({ "run_id": run_id }));
     let events = read_tail_lines(&run_dir.join("events.jsonl"), tail)?;
     let progress = run_progress_report(&run_dir);
+    let report_path = run_dir.join("report.html");
     Ok(json!({
         "run": record,
         "events_path": run_dir.join("events.jsonl"),
+        "report_path": if report_path.exists() { json!(report_path) } else { serde_json::Value::Null },
         "progress": progress,
         "events": events
     }))
@@ -690,14 +759,7 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
     let run_id = json_string(run, "run_id").unwrap_or_else(|| "unknown".to_string());
     let status = json_string(run, "status").unwrap_or_else(|| "unknown".to_string());
     let workflow = json_string(run, "workflow").unwrap_or_else(|| "-".to_string());
-    let started = run.get("started_ms").and_then(|value| value.as_u64());
-    let finished = run.get("finished_ms").and_then(|value| value.as_u64());
-    let duration = match (started, finished) {
-        (Some(started), Some(finished)) if finished >= started => {
-            format!("{}ms", finished - started)
-        }
-        _ => "running".to_string(),
-    };
+    let duration = format_run_duration(run);
     let active = progress
         .get("active_agents")
         .and_then(|value| value.as_array())
@@ -726,6 +788,9 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
         ),
         format!("Resume: odw exec --resume {run_id}"),
     ];
+    if let Some(report_path) = json_string(report, "report_path") {
+        lines.push(format!("Report: {report_path}"));
+    }
 
     let events = report
         .get("events")
@@ -743,6 +808,7 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
             .rev()
             .find(|event| json_string(event, "type").as_deref() == Some("workflow_error"))
             .and_then(|event| json_string(event, "message"))
+            .or_else(|| progress.get("result").and_then(format_result_failure_cause))
             .or_else(|| json_string(&run["error"], "message"))
             .or_else(|| json_string(run, "error"));
         if let Some(cause) = cause {
@@ -784,6 +850,20 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
         }
     }
 
+    let history_lines = progress
+        .get("result")
+        .and_then(|result| result.get("history"))
+        .and_then(|history| history.as_array())
+        .map(|history| format_workflow_history_for_runs_show(history))
+        .unwrap_or_default();
+    if !history_lines.is_empty() {
+        lines.push("".to_string());
+        lines.push("Workflow history:".to_string());
+        for line in history_lines {
+            lines.push(format!("  - {line}"));
+        }
+    }
+
     let completed_agents = progress
         .get("completed_agent_details")
         .and_then(|value| value.as_array())
@@ -801,14 +881,242 @@ fn format_runs_show_view(report: &serde_json::Value) -> String {
         lines.push("".to_string());
         lines.push("Recent events:".to_string());
         for event in events.iter().rev().take(16).rev() {
-            let summary = json_string(event, "summary")
-                .or_else(|| json_string(event, "type"))
-                .unwrap_or_else(|| truncate(&event.to_string(), 160));
+            let summary = format_recent_event_for_runs_show(event);
             lines.push(format!("  - {summary}"));
         }
     }
 
     lines.join("\n")
+}
+
+fn format_result_failure_cause(result: &serde_json::Value) -> Option<String> {
+    if result.get("ok").and_then(|value| value.as_bool()) != Some(false) {
+        return None;
+    }
+    let error = result.get("error")?;
+    if let Some(message) = error
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(message.to_string());
+    }
+    let category = json_string(error, "category");
+    let message = json_string(error, "message");
+    match (category, message) {
+        (Some(category), Some(message)) if !message.trim().is_empty() => {
+            Some(format!("{category}: {}", message.trim()))
+        }
+        (Some(category), _) if !category.trim().is_empty() => Some(category.trim().to_string()),
+        (_, Some(message)) if !message.trim().is_empty() => Some(message.trim().to_string()),
+        _ => None,
+    }
+}
+
+fn format_workflow_history_for_runs_show(history: &[serde_json::Value]) -> Vec<String> {
+    history
+        .iter()
+        .filter_map(format_workflow_history_item_for_runs_show)
+        .take(12)
+        .collect()
+}
+
+fn format_workflow_history_item_for_runs_show(item: &serde_json::Value) -> Option<String> {
+    let step = json_string(item, "step")?;
+    let round = item.get("round").and_then(|value| value.as_u64());
+    let tasks = item
+        .get("tasks")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|task| {
+                    json_string(task, "id").or_else(|| task.as_str().map(str::to_string))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let files = item
+        .get("files")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    let blockers = item
+        .get("blockers")
+        .and_then(|value| value.as_array())
+        .map(Vec::len)
+        .unwrap_or(0);
+    let blocker_sample = item
+        .get("blockers")
+        .and_then(|value| value.as_array())
+        .and_then(|items| items.first())
+        .and_then(|value| value.as_str())
+        .map(|value| format!(" — {}", truncate(value, 180)))
+        .unwrap_or_default();
+
+    match step.as_str() {
+        "plan" => {
+            let summary = json_string(item, "summary")
+                .map(|value| format!(" — {}", truncate(&value, 120)))
+                .unwrap_or_default();
+            Some(format!(
+                "plan: {} task(s) {}{}",
+                tasks.len(),
+                truncate(&tasks.join(","), 120),
+                summary
+            ))
+        }
+        "implement" => Some(format!(
+            "implement r{}: {} task(s), {} file(s)",
+            round.unwrap_or(1),
+            tasks.len(),
+            files
+        )),
+        "pre_review_block" => Some(format!(
+            "pre-review block r{}: failed={} scope_issues={}",
+            round.unwrap_or(1),
+            item.get("failed_tasks")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0),
+            item.get("scope_issues")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0)
+        )),
+        "review" => {
+            let decision = json_string(item, "decision").unwrap_or_else(|| "unknown".to_string());
+            let apply_ready = item
+                .get("applyReady")
+                .and_then(|value| value.as_bool())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "false".to_string());
+            Some(format!(
+                "review r{}: {decision} applyReady={apply_ready} blockers={} files={files}{blocker_sample}",
+                round.unwrap_or(1),
+                blockers
+            ))
+        }
+        "repair_plan" => {
+            let reason = json_string(item, "reason")
+                .map(|value| format!(" reason={value}"))
+                .unwrap_or_default();
+            Some(format!(
+                "repair plan r{}: tasks={} retained_files={}{}",
+                round.unwrap_or(1),
+                truncate(&tasks.join(","), 140),
+                item.get("retained_files")
+                    .and_then(|value| value.as_array())
+                    .map(Vec::len)
+                    .unwrap_or(0),
+                reason
+            ))
+        }
+        "repair" => Some(format!(
+            "repair r{}: tasks={} files={} candidate_files={}",
+            round.unwrap_or(1),
+            truncate(&tasks.join(","), 140),
+            files,
+            item.get("candidate_files")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0)
+        )),
+        "verify" => {
+            let ok = item
+                .get("ok")
+                .and_then(|value| value.as_bool())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let guard_ok = item
+                .get("guard")
+                .and_then(|guard| guard.get("ok"))
+                .and_then(|value| value.as_bool())
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            Some(format!("verify: ok={ok} guard={guard_ok}"))
+        }
+        _ => Some(truncate(&item.to_string(), 220)),
+    }
+}
+
+fn format_recent_event_for_runs_show(event: &serde_json::Value) -> String {
+    let raw = event.get("raw").unwrap_or(event);
+    if json_string(raw, "type").as_deref() == Some("workflow_done") {
+        let name = json_string(raw, "name").unwrap_or_else(|| "workflow".to_string());
+        let result = raw
+            .get("result")
+            .filter(|value| !value.is_null())
+            .map(summarize_workflow_result_for_runs_show)
+            .filter(|summary| !summary.is_empty())
+            .map(|summary| format!(" result {summary}"))
+            .unwrap_or_default();
+        return format!("[workflow] done {name}{result}");
+    }
+
+    if raw.is_object() {
+        return truncate(&summarize_script_event(raw), 260);
+    }
+
+    json_string(event, "summary")
+        .map(|summary| truncate(&summary, 260))
+        .or_else(|| json_string(event, "type"))
+        .unwrap_or_else(|| truncate(&event.to_string(), 160))
+}
+
+fn summarize_workflow_result_for_runs_show(result: &serde_json::Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(ok) = result.get("ok").and_then(|value| value.as_bool()) {
+        parts.push(format!("ok={ok}"));
+    }
+    if let Some(category) = result
+        .get("error")
+        .and_then(|error| json_string(error, "category"))
+    {
+        parts.push(format!("error={category}"));
+    }
+    if let Some(decision) = result
+        .get("gate")
+        .and_then(|gate| json_string(gate, "decision"))
+    {
+        parts.push(format!("decision={decision}"));
+    }
+    if let Some(apply_ready) = result
+        .get("gate")
+        .and_then(|gate| gate.get("applyReady"))
+        .and_then(|value| value.as_bool())
+    {
+        parts.push(format!("applyReady={apply_ready}"));
+    }
+    if let Some(applied) = result
+        .get("landed")
+        .and_then(|landed| landed.get("applied"))
+        .and_then(|value| value.as_u64())
+    {
+        parts.push(format!("applied={applied}"));
+    }
+    if let Some(failed) = result
+        .get("landed")
+        .and_then(|landed| landed.get("failed"))
+        .and_then(|value| value.as_u64())
+    {
+        parts.push(format!("failed={failed}"));
+    }
+    if let Some(ok) = result
+        .get("verifyGuard")
+        .and_then(|guard| guard.get("ok"))
+        .and_then(|value| value.as_bool())
+    {
+        parts.push(format!("verifyGuard={ok}"));
+    }
+
+    if parts.is_empty() {
+        serde_json::to_string(result)
+            .map(|value| truncate(&value, 240))
+            .unwrap_or_default()
+    } else {
+        parts.join(" ")
+    }
 }
 
 fn latest_agent_message_for_key(events: &[serde_json::Value], key: &str) -> Option<String> {
@@ -929,6 +1237,14 @@ fn exec_script(args: ExecArgs) -> Result<()> {
         .map(|run_dir| run_dir.join("state.json"))
         .filter(|path| path.exists());
     fs::create_dir_all(&run_dir).with_context(|| format!("create {}", run_dir.display()))?;
+    // Retention: .odw/runs is otherwise unbounded (dogfooding accumulated 4882
+    // run dirs). Keep the most recent ODW_RUNS_KEEP runs (default 50; 0 disables).
+    // Best-effort; never prunes this run's own dir or the one we are resuming.
+    let mut protected_runs: Vec<&Path> = vec![run_dir.as_path()];
+    if let Some(resume_dir) = resume_run_dir.as_deref() {
+        protected_runs.push(resume_dir);
+    }
+    prune_old_runs(&root.join(".odw/runs"), &protected_runs);
     fs::write(run_dir.join("input.raw"), &input)
         .with_context(|| format!("write {}", run_dir.join("input.raw").display()))?;
     fs::write(&runner, ODW_JS_RUNNER).with_context(|| format!("write {}", runner.display()))?;
@@ -958,7 +1274,6 @@ fn exec_script(args: ExecArgs) -> Result<()> {
             resume_state_path,
             backend: args.backend,
             odw_bin: current_exe,
-            codexctl_bin: args.codexctl_bin,
             pandacode_bin: resolved_pandacode_bin(&args.pandacode_bin),
             provider: args.provider,
             model: args.model,
@@ -1083,7 +1398,11 @@ fn resolved_pandacode_bin(configured: &str) -> String {
         return configured.to_string();
     }
     if let Ok(exe) = std::env::current_exe() {
-        let bin_name = if cfg!(windows) { "pandacode.exe" } else { "pandacode" };
+        let bin_name = if cfg!(windows) {
+            "pandacode.exe"
+        } else {
+            "pandacode"
+        };
         if let Some(sibling) = exe.parent().map(|dir| dir.join(bin_name))
             && sibling.is_file()
         {
@@ -1145,7 +1464,6 @@ struct ScriptRunConfig {
     resume_state_path: Option<PathBuf>,
     backend: String,
     odw_bin: String,
-    codexctl_bin: String,
     pandacode_bin: String,
     provider: Option<String>,
     model: Option<String>,
@@ -1230,7 +1548,6 @@ fn run_observable_script(root: &Path, command: Vec<String>, config: ScriptRunCon
             config.resume_from.as_deref().unwrap_or_default(),
         )
         .env("ODW_BIN", &config.odw_bin)
-        .env("ODW_CODEXCTL_BIN", &config.codexctl_bin)
         .env("ODW_PANDACODE_BIN", &config.pandacode_bin)
         .env("ODW_PROVIDER", config.provider.as_deref().unwrap_or(""))
         .env("ODW_MODEL", config.model.as_deref().unwrap_or(""))
@@ -1306,7 +1623,7 @@ fn run_observable_script(root: &Path, command: Vec<String>, config: ScriptRunCon
             }
             if !config.json_only {
                 println!("[odw] completed run_id={}", config.run_id);
-                println!("[odw] logs: ./.odw/bin/odw runs show {}", config.run_id);
+                println!("[odw] logs: odw runs show {}", config.run_id);
             }
             return Ok(());
         }
@@ -1403,6 +1720,10 @@ fn summarize_script_event(value: &serde_json::Value) -> String {
         Some("workflow_error") => {
             let message = json_string(value, "message").unwrap_or_else(|| "unknown".to_string());
             format!("[workflow] error {message}")
+        }
+        Some("exit") => {
+            let status = json_string(value, "status").unwrap_or_else(|| "-".to_string());
+            format!("[exit] status={status}")
         }
         Some("phase") => {
             let title = json_string(value, "title").unwrap_or_else(|| "phase".to_string());
@@ -1509,6 +1830,75 @@ fn summarize_script_event(value: &serde_json::Value) -> String {
                 .unwrap_or(false);
             let files = value.get("files").and_then(|f| f.as_u64()).unwrap_or(0);
             format!("[worktree] done {label} changed={changed} files={files}")
+        }
+        Some("worktree_patch_apply") => {
+            let label = ev_str(value, "label");
+            let ok = value
+                .get("ok")
+                .and_then(|field| field.as_bool())
+                .unwrap_or(false);
+            let applied = value
+                .get("applied")
+                .and_then(|field| field.as_bool())
+                .unwrap_or(false);
+            let files = value.get("files").and_then(|f| f.as_u64()).unwrap_or(0);
+            format!("[worktree] apply {label} ok={ok} applied={applied} files={files}")
+        }
+        Some("worktree_review_gate") => {
+            let label = ev_str(value, "label");
+            let decision = json_string(value, "decision").unwrap_or_else(|| "-".to_string());
+            let ok = value
+                .get("ok")
+                .and_then(|field| field.as_bool())
+                .unwrap_or(false);
+            let files = value.get("files").and_then(|f| f.as_u64()).unwrap_or(0);
+            let reviewers = value.get("reviewers").and_then(|f| f.as_u64()).unwrap_or(0);
+            let preflight = json_string(value, "preflight_category")
+                .or_else(|| json_string(value, "category"))
+                .map(|category| {
+                    let message = json_string(value, "preflight_message")
+                        .or_else(|| json_string(value, "message"))
+                        .map(|message| format!(" message={}", truncate(&message, 160)))
+                        .unwrap_or_default();
+                    format!(" category={category}{message}")
+                })
+                .unwrap_or_default();
+            format!(
+                "[worktree] review {label} decision={decision} ok={ok} files={files} reviewers={reviewers}{preflight}"
+            )
+        }
+        Some("worktree_review_workspace") => {
+            let label = ev_str(value, "label");
+            let status = json_string(value, "status").unwrap_or_else(|| "-".to_string());
+            let files = value.get("files").and_then(|f| f.as_u64()).unwrap_or(0);
+            format!("[worktree] review-workspace {label} {status} files={files}")
+        }
+        Some("worktree_snapshot_check") => {
+            let label = ev_str(value, "label");
+            let ok = value
+                .get("ok")
+                .and_then(|field| field.as_bool())
+                .unwrap_or(false);
+            let files = ev_u64(value, "files", 0);
+            let added = ev_u64(value, "added", 0);
+            let removed = ev_u64(value, "removed", 0);
+            let modified = ev_u64(value, "modified", 0);
+            format!(
+                "[worktree] snapshot {label} ok={ok} files={files} added={added} removed={removed} modified={modified}"
+            )
+        }
+        Some("worktree_snapshot_restore") => {
+            let label = ev_str(value, "label");
+            let ok = value
+                .get("ok")
+                .and_then(|field| field.as_bool())
+                .unwrap_or(false);
+            let restored = ev_u64(value, "restored", 0);
+            let removed = ev_u64(value, "removed", 0);
+            let errors = ev_u64(value, "errors", 0);
+            format!(
+                "[worktree] restore {label} ok={ok} restored={restored} removed={removed} errors={errors}"
+            )
         }
         Some("panda_auto_answer") => {
             let runtime = json_string(value, "runtime").unwrap_or_else(|| "-".to_string());
@@ -1701,7 +2091,7 @@ fn capabilities_json() -> serde_json::Value {
     json!({
         "primary_user": "Agent or CLI caller",
         "runtime": "ODW direct JavaScript runner",
-        "optional_integration": "Claude Code Dynamic Workflows",
+        "optional_integration": "External callers can invoke the same CLI/scripts; ODW does not install Claude slash commands or project files.",
         "agent_bridge": "PandaCode dispatches each node to its codex/claude/bamboo runtime via single-shot `pandacode <runtime> exec`",
         "lifecycle": {
             "exec": {
@@ -1711,38 +2101,43 @@ fn capabilities_json() -> serde_json::Value {
             },
             "watch": {
                 "cli": "odw runs show <run_id|latest>",
-                "claude_code": "/workflows for Claude-launched runs",
-                "note": "Direct runs are watched through ODW journals. Claude-launched runs can also use Claude Code's workflow UI."
+                "list": "odw runs list",
+                "note": "Direct runs are watched through ODW journals and compact run summaries; HTML reports are linked from runs show when present."
             },
             "pause_resume": {
-                "claude_code": "/workflows then p",
                 "cli": "odw exec --resume <run_id|latest>",
                 "note": "Direct exec resumes from .odw/runs/<run_id>/state.json and skips completed node ids."
             },
             "stop": {
-                "claude_code": "/workflows then x"
+                "cli": "stop the invoking process"
             },
             "restart_agent": {
-                "claude_code": "/workflows then r"
-            },
-            "save": {
-                "claude_code": "/workflows then s"
-            },
-            "remove": {
-                "cli": "odw workflows remove <name>"
-            },
-            "evidence": {
-                "cli": "odw evidence --path <project>",
-                "note": "Reads saved Claude Code workflow artifacts under ~/.claude/projects."
+                "cli": "edit the node prompt or options and run `odw exec --resume <run_id|latest>`; unchanged completed nodes stay cached"
             },
             "observability": {
                 "cli": "odw exec streams direct node progress; use odw runs list/show for journals.",
-                "files": ".odw/runs/<odw-run-id>/events.jsonl",
-                "note": "ODW records workflow_start, phase, node start/done/skip, checkpoint, error, and exit events for direct runs."
+                "files": ".odw/runs/<odw-run-id>/events.jsonl, state.json, run.json, report.html when generated",
+                "note": "ODW records workflow_start, phase, node start/done/skip, review gate, apply, snapshot, checkpoint, error, and exit events for direct runs."
             },
             "spec": {
                 "cli": "odw spec",
                 "note": "Documents the direct workflow script contract, Codex helpers, and compatibility surfaces."
+            },
+            "contract": {
+                "cli": "odw contract",
+                "note": "Prints the full authoring contract for agents."
+            },
+            "doctor": {
+                "cli": "odw doctor",
+                "note": "Checks node and pandacode wiring for direct runs."
+            },
+            "report": {
+                "cli": "odw report --run <run_id|latest> --open",
+                "note": "Renders a self-contained HTML execution graph for an existing run; `--script` mock-runs first."
+            },
+            "starter": {
+                "cli": "odw starter parallel-review-apply > wf.js",
+                "note": "Prints a built-in large-project starter workflow: optional request/spec planner, parallel worktrees, candidate-worktree review gate, targeted repair/re-review, approve-only atomic landing, and read-only final verification guarded/restored by a main-worktree snapshot."
             },
             "error_feedback": {
                 "schema": ".odw/schemas/error-feedback.schema.json",
@@ -1753,8 +2148,10 @@ fn capabilities_json() -> serde_json::Value {
             "parallel": "Dynamic Workflow-compatible parallel([() => agent(...), ...]) fan-out/join with max 16 concurrent thunks",
             "fanout": "fanout(items, mapper) dynamically maps structured upstream output into parallel downstream nodes",
             "pipeline": "Dynamic Workflow-compatible pipeline(items, ...stages) streams each item through sequential stages while items fan out",
+            "worktree_review": "reviewWorktreeDiffs(results, opts) preflights captured worktree patches, applies them to a temporary candidate worktree, and runs structured reviewer agents there before landing",
+            "worktree_apply": "applyWorktreeDiffs(results, opts) atomically applies captured worktree patches to the main cwd by default; continueOnError opts into partial landing",
             "schemas": "Optional .odw/schemas/*.schema.json contracts. No node receives a default schema; workflow code opts in with schema (schemaDescription optional) for runtime validation, schema_mismatch feedback, and same-node retry context injection",
-            "observability": ".odw/runs/*.json and .odw/runs/*/events.jsonl",
+            "observability": ".odw/runs/*.json, .odw/runs/*/events.jsonl, and HTML reports that include agent nodes, review gates, candidate workspaces, and apply events",
             "agent_types": built_in_agents().iter().map(|agent| agent.name).collect::<Vec<_>>()
         }
     })
@@ -1768,12 +2165,9 @@ fn framework_spec_json() -> serde_json::Value {
         "types_dts": pack::WORKFLOW_API_DTS,
         "compatibility_target": {
             "runtime": "ODW direct JavaScript runner",
-            "optional_runtime": "Claude Code Dynamic Workflows",
-            "minimum_observed_claude_code_version": "2.1.154",
-            "project_subagents": ".claude/agents/*.md",
-            "project_commands": ".claude/commands/*.md",
-            "project_workflows": ".claude/workflows/*.js",
-            "management_surface": "odw runs list/show; Claude Code /workflows for Claude-launched runs"
+            "optional_external_callers": "Claude Code, Codex, shell scripts, CI, or any agent can invoke the CLI; ODW itself does not install slash commands or project templates.",
+            "project_workflows": "normal JavaScript files; workflow(nameOrRef, args) can resolve .claude/workflows/<name>.js, odw-<name>.js, or a path when those files already exist",
+            "management_surface": "odw exec, odw runs list/show, odw report, odw starter, odw guide/spec/contract/capabilities"
         },
         "script_contract": {
             "language": "JavaScript module",
@@ -1791,6 +2185,8 @@ fn framework_spec_json() -> serde_json::Value {
             "parallel": "parallel([() => agent(...), ...]) is the primary node fan-out/join API; keep concurrency <= 16.",
             "fanout": "fanout(items, mapper) maps structured upstream output into dynamic parallel child nodes.",
             "pipeline": "pipeline(items, ...stages) runs each item through sequential stages while items fan out.",
+            "review_worktree_diffs": "reviewWorktreeDiffs(candidates, opts?) reviews captured worktree diffs before landing: preflight combined patch, create a temporary candidate worktree with the patch applied, run structured reviewers there, and return approve/reject/needs_owner.",
+            "apply_worktree_diffs": "applyWorktreeDiffs(candidates, opts?) applies captured worktree diffs to the main cwd atomically by default; use continueOnError:true only for intentional partial landing.",
             "schema_retry": "No schema is applied by default. When options.schema is set, schemaDescription is optional; direct exec appends the full JSON Schema as a final-response-only contract, validates that final response, emits agent_schema_invalid on mismatch, injects validation context into the same node prompt, and retries up to retry.maxAttempts.",
             "prompt_style": "Workflow scripts declare prompt slots. Real runs inject input.prompts.<slot>; mock runs may use suggested template literals for smoke tests.",
             "error_feedback": "Every node prompt includes a failure contract. A worker that cannot complete returns .odw/schemas/error-feedback.schema.json instead of unstructured prose.",
@@ -1801,15 +2197,15 @@ fn framework_spec_json() -> serde_json::Value {
             }
         },
         "lifecycle": {
-            "run": "odw exec --script <workflow.js> --input <json> --backend <mock|pandacode>; optional /odw, /odw-audit, /odw-ship, /odw-flow for Claude Code",
+            "run": "odw exec --script <workflow.js> --input <json> --backend <mock|pandacode>",
             "watch": "odw runs show <run_id|latest>",
             "observe": "odw exec live stream + odw runs list/show journals",
-            "pause_resume": "odw exec --resume <run_id|latest>; optional /workflows then p for Claude Code",
-            "stop": "stop the invoking process; Claude Code /workflows then x for Claude-launched runs",
-            "restart_agent": "direct exec resumes by node id; Claude Code /workflows then r for Claude-launched runs",
-            "save": "workflow scripts are normal files; Claude Code /workflows then s for Claude-launched scripts",
-            "remove_template": "odw workflows remove <name>",
-            "artifact_evidence": "odw evidence",
+            "pause_resume": "odw exec --resume <run_id|latest>",
+            "stop": "stop the invoking process",
+            "restart_agent": "edit the node prompt/options and resume; direct exec skips unchanged completed nodes by fingerprint and re-runs changed nodes",
+            "save": "workflow scripts are normal files; save or delete them with ordinary filesystem operations",
+            "starter": "odw starter parallel-review-apply > wf.js",
+            "report": "odw report --run <run_id|latest> --open",
             "run_journal": ".odw/runs/<run_id>/events.jsonl"
         },
         "agent_types": built_in_agents().iter().map(|agent| json!({
@@ -1817,9 +2213,9 @@ fn framework_spec_json() -> serde_json::Value {
             "description": agent.description
         })).collect::<Vec<_>>(),
         "extension_points": {
-            "new_agent": "Add .claude/agents/<name>.md with Claude Code subagent frontmatter.",
-            "new_command": "Add .claude/commands/<name>.md with a prompt and $ARGUMENTS.",
-            "new_workflow": "Add .claude/workflows/<name>.js following .odw/framework/workflow-api.d.ts.",
+            "new_agent": "Add another agent(...) call or helper function in the workflow script; agentType is optional metadata and runtime/provider selects execution.",
+            "new_command": "Wrap an `odw exec` invocation in your own shell, CI, or external agent command if desired.",
+            "new_workflow": "Create a JavaScript workflow file following `odw spec` / workflow-api.d.ts; `odw starter` can print the built-in large-project template.",
             "new_schema": "Schemas are opt-in. Add .odw/schemas/<name>.schema.json, then reference it from workflow code with agent(..., { schema, schemaDescription })."
         }
     })
@@ -1842,6 +2238,89 @@ fn sorted_dirs(dir: &Path) -> Result<Vec<PathBuf>> {
         .collect::<Vec<_>>();
     dirs.sort();
     Ok(dirs)
+}
+
+const STALE_ACTIVE_RUN_MS: u64 = 24 * 60 * 60 * 1000;
+const RUN_RETENTION_GRACE_MS: u64 = 60 * 60 * 1000;
+
+/// Keep only the most recent `ODW_RUNS_KEEP` run dirs under `.odw/runs` (default
+/// 50; 0 disables). Run dirs are named `odw-exec-<epoch_ms>-<n>`, so the lexical
+/// order from `sorted_dirs` is chronological — the oldest are deleted first.
+/// Best-effort: any failure is ignored so retention never breaks a run.
+fn prune_old_runs(runs_dir: &Path, protect: &[&Path]) {
+    let keep = std::env::var("ODW_RUNS_KEEP")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(50);
+    prune_runs_keeping(runs_dir, keep, protect);
+}
+
+fn prune_runs_keeping(runs_dir: &Path, keep: usize, protect: &[&Path]) {
+    if keep == 0 {
+        return;
+    }
+    let dirs = match sorted_dirs(runs_dir) {
+        Ok(dirs) => dirs,
+        Err(_) => return,
+    };
+    if dirs.len() <= keep {
+        return;
+    }
+    // Protected dirs (the run we just created + the run being resumed) are never
+    // pruned. Other active/fresh run dirs are also skipped so concurrent
+    // `odw exec` processes in the same repo cannot delete each other's
+    // in-progress dir out from under them.
+    let protected: Vec<_> = protect.iter().filter_map(|path| path.file_name()).collect();
+    let remove_count = dirs.len() - keep;
+    let now_ms = now_millis() as u64;
+    for dir in dirs.into_iter().take(remove_count) {
+        if dir
+            .file_name()
+            .is_some_and(|name| protected.contains(&name))
+        {
+            continue;
+        }
+        if !run_dir_prunable(&dir, now_ms) {
+            continue;
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+fn run_dir_prunable(dir: &Path, now_ms: u64) -> bool {
+    let record_path = dir.join("run.json");
+    if let Ok(content) = fs::read_to_string(&record_path)
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        let status = value
+            .get("status")
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        let finished_or_started_ms = value
+            .get("finished_ms")
+            .and_then(|item| item.as_u64())
+            .or_else(|| value.get("started_ms").and_then(|item| item.as_u64()))
+            .or_else(|| {
+                value
+                    .get("run_id")
+                    .and_then(|item| item.as_str())
+                    .and_then(run_id_started_ms)
+            })
+            .unwrap_or(now_ms);
+        if matches!(status, "completed" | "failed" | "error" | "stopped") {
+            return now_ms.saturating_sub(finished_or_started_ms) > RUN_RETENTION_GRACE_MS;
+        }
+        return now_ms.saturating_sub(finished_or_started_ms) > STALE_ACTIVE_RUN_MS;
+    }
+
+    let run_id_started_ms = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(run_id_started_ms);
+    let Some(started_ms) = run_id_started_ms else {
+        return true;
+    };
+    now_ms.saturating_sub(started_ms) > RUN_RETENTION_GRACE_MS
 }
 
 fn run_version(command: &str, args: &[&str]) -> ToolStatus {
@@ -1929,10 +2408,10 @@ mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-
     #[test]
     fn capabilities_expose_lifecycle_boundaries() {
         let value = capabilities_json();
+        let rendered = serde_json::to_string(&value).unwrap();
         assert_eq!(value["primary_user"], "Agent or CLI caller");
         assert_eq!(value["runtime"], "ODW direct JavaScript runner");
         // Assert the stable invariant, not exact prose: the bridge names pandacode
@@ -1954,15 +2433,50 @@ mod tests {
             value["lifecycle"]["pause_resume"]["note"],
             "Direct exec resumes from .odw/runs/<run_id>/state.json and skips completed node ids."
         );
+        assert_eq!(value["lifecycle"]["watch"]["list"], "odw runs list");
+        assert_eq!(
+            value["lifecycle"]["report"]["cli"],
+            "odw report --run <run_id|latest> --open"
+        );
+        assert_eq!(
+            value["lifecycle"]["starter"]["cli"],
+            "odw starter parallel-review-apply > wf.js"
+        );
         assert_eq!(
             value["composition"]["parallel"],
             "Dynamic Workflow-compatible parallel([() => agent(...), ...]) fan-out/join with max 16 concurrent thunks"
         );
+        assert!(
+            value["composition"]["worktree_review"]
+                .as_str()
+                .unwrap()
+                .contains("reviewWorktreeDiffs")
+        );
+        assert!(
+            value["composition"]["worktree_apply"]
+                .as_str()
+                .unwrap()
+                .contains("applyWorktreeDiffs")
+        );
+        for forbidden in [
+            "odw evidence",
+            "odw workflows",
+            "/odw",
+            "/workflows then",
+            "claude_code",
+            "Claude-launched",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "capabilities should not advertise unsupported direct surface {forbidden}: {rendered}"
+            );
+        }
     }
 
     #[test]
     fn spec_exposes_direct_script_contract() {
         let value = framework_spec_json();
+        let rendered = serde_json::to_string(&value).unwrap();
         assert_eq!(value["name"], "Open Dynamic Workflow");
         assert_eq!(
             value["compatibility_target"]["runtime"],
@@ -1976,10 +2490,45 @@ mod tests {
             value["script_contract"]["codex"],
             "Route Codex through ordinary agent(prompt, { runtime: 'codex' }); agentType is optional metadata."
         );
+        assert!(
+            value["script_contract"]["review_worktree_diffs"]
+                .as_str()
+                .unwrap()
+                .contains("approve/reject/needs_owner")
+        );
+        assert!(
+            value["script_contract"]["apply_worktree_diffs"]
+                .as_str()
+                .unwrap()
+                .contains("atomically")
+        );
+        assert_eq!(
+            value["lifecycle"]["starter"],
+            "odw starter parallel-review-apply > wf.js"
+        );
+        assert_eq!(
+            value["lifecycle"]["report"],
+            "odw report --run <run_id|latest> --open"
+        );
         assert_eq!(
             value["script_contract"]["limits"]["max_concurrent_agents"],
             16
         );
+        for forbidden in [
+            "odw evidence",
+            "odw workflows",
+            "/odw",
+            "/workflows then",
+            "Claude-launched",
+            ".odw/framework",
+            "project_subagents",
+            "project_commands",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "spec should not advertise unsupported direct surface {forbidden}: {rendered}"
+            );
+        }
     }
 
     #[test]
@@ -1990,16 +2539,29 @@ mod tests {
         assert!(ODW_JS_RUNNER.contains("globalThis.fanout"));
         assert!(ODW_JS_RUNNER.contains("globalThis.pipeline"));
         assert!(ODW_JS_RUNNER.contains("globalThis.log"));
+        assert!(ODW_JS_RUNNER.contains("const index = agentIndex"));
+        assert!(!ODW_JS_RUNNER.contains("index: agentIndex"));
         assert!(ODW_JS_RUNNER.contains("globalThis.promptSlot"));
         assert!(ODW_JS_RUNNER.contains("globalThis.args"));
+        assert!(ODW_JS_RUNNER.contains("bambooApiKeyPreflight"));
+        assert!(ODW_JS_RUNNER.contains("bamboo_missing_api_key"));
+        assert!(ODW_JS_RUNNER.contains("panda_preflight_blocked"));
         assert!(ODW_JS_RUNNER.contains("appendSchemaContract"));
         assert!(ODW_JS_RUNNER.contains("ODW final response contract"));
+        assert!(ODW_JS_RUNNER.contains("The final response must start with { and end with }"));
+        assert!(ODW_JS_RUNNER.contains("Required final response shape"));
         assert!(ODW_JS_RUNNER.contains("resolveSchemaDescription"));
         // Built-in Workflow parity surface (guards against runtime regressions).
         assert!(ODW_JS_RUNNER.contains("getMaxConcurrency"));
         assert!(ODW_JS_RUNNER.contains("scriptDeterminismGuards"));
         assert!(ODW_JS_RUNNER.contains("createWorktree"));
         assert!(ODW_JS_RUNNER.contains("captureWorktreeChanges"));
+        assert!(ODW_JS_RUNNER.contains("globalThis.applyWorktreeDiff"));
+        assert!(ODW_JS_RUNNER.contains("globalThis.applyWorktreeDiffs"));
+        assert!(ODW_JS_RUNNER.contains("globalThis.reviewWorktreeDiffs"));
+        assert!(ODW_JS_RUNNER.contains("worktree_patch_apply"));
+        assert!(ODW_JS_RUNNER.contains("worktree_review_gate"));
+        assert!(ODW_JS_RUNNER.contains("worktree_review_workspace"));
         assert!(ODW_JS_RUNNER.contains("globalThis.workflow"));
         assert!(ODW_JS_RUNNER.contains("extractJsonObjectStrings"));
         assert!(ODW_JS_RUNNER.contains("agentCacheKey"));
@@ -2046,6 +2608,8 @@ mod tests {
                 r#"{"type":"launch"}"#,
                 r#"{"raw":{"type":"codex_poll","key":"active-node","last_agent_message":"Older status"},"summary":"[event] codex_poll"}"#,
                 r#"{"raw":{"type":"codex_poll","key":"active-node","last_agent_message":"Latest active status"},"summary":"[event] codex_poll"}"#,
+                r#"{"raw":{"type":"worktree_review_gate","label":"batch-review-r1","ok":false,"decision":"reject","files":2,"reviewers":0,"preflight_category":"patch_conflict","preflight_message":"error: patch failed: same.txt:1\nerror: same.txt: patch does not apply","blockers":1},"summary":"[event] worktree_review_gate"}"#,
+                r#"{"type":"workflow_done","name":"test-flow","result":{"ok":true,"gate":{"decision":"approve","applyReady":true},"landed":{"applied":4,"failed":0},"verifyGuard":{"ok":true},"verification":["long evidence that should stay out of the compact runs show view"]}}"#,
                 r#"{"type":"exit","status":"completed"}"#,
             ]
             .join("\n"),
@@ -2055,6 +2619,52 @@ mod tests {
             root.join(".odw/runs/odw-run-test/state.json"),
             serde_json::to_string_pretty(&json!({
                 "workflow": "test-flow",
+                "result": {
+                    "ok": true,
+                    "history": [
+                        {
+                            "step": "plan",
+                            "summary": "mock planned summary",
+                            "tasks": [
+                                {"id": "alpha", "files": ["a.js"]},
+                                {"id": "beta", "files": ["b.js"]}
+                            ]
+                        },
+                        {
+                            "step": "implement",
+                            "round": 1,
+                            "tasks": ["alpha", "beta"],
+                            "files": ["a.js", "b.js"]
+                        },
+                        {
+                            "step": "review",
+                            "round": 1,
+                            "decision": "reject",
+                            "applyReady": false,
+                            "blockers": ["test failed"],
+                            "files": ["a.js", "b.js"]
+                        },
+                        {
+                            "step": "repair_plan",
+                            "round": 2,
+                            "tasks": ["beta"],
+                            "retained_files": ["a.js"]
+                        },
+                        {
+                            "step": "review",
+                            "round": 2,
+                            "decision": "approve",
+                            "applyReady": true,
+                            "blockers": [],
+                            "files": ["a.js", "b.js"]
+                        },
+                        {
+                            "step": "verify",
+                            "ok": true,
+                            "guard": {"ok": true, "files": 0}
+                        }
+                    ]
+                },
                 "activeAgents": {
                     "active-node": {
                         "key": "active-node",
@@ -2073,17 +2683,167 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        fs::write(
+            root.join(".odw/runs/odw-run-test/report.html"),
+            "<html></html>",
+        )
+        .unwrap();
 
         let list = runs_list_report(&root).unwrap();
         assert_eq!(list["runs"].as_array().unwrap().len(), 1);
-        let shown = runs_show_report(&root, "latest", 4).unwrap();
-        assert_eq!(shown["events"].as_array().unwrap().len(), 4);
+        let list_view = format_runs_list_view(&list);
+        assert!(list_view.contains("Runs in "));
+        assert!(list_view.contains("odw-run-test [completed]"));
+        assert!(list_view.contains("duration="));
+        assert!(list_view.contains("workflow=-"));
+        assert!(list_view.contains("Show: odw runs show <run_id|latest>"));
+        assert!(list_view.contains("JSON: odw runs list --json"));
+        let shown = runs_show_report(&root, "latest", 5).unwrap();
+        assert_eq!(shown["events"].as_array().unwrap().len(), 5);
+        assert!(
+            shown["report_path"]
+                .as_str()
+                .unwrap()
+                .ends_with("report.html")
+        );
         assert_eq!(shown["progress"]["completed_agents"], 0);
+        assert_eq!(
+            shown["progress"]["result"]["history"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
         assert_eq!(
             shown["progress"]["active_agents"].as_array().unwrap().len(),
             1
         );
-        assert!(format_runs_show_view(&shown).contains("last: Latest active status"));
+        let view = format_runs_show_view(&shown);
+        assert!(view.contains("last: Latest active status"));
+        assert!(view.contains("Report: "));
+        assert!(view.contains("report.html"));
+        assert!(view.contains("Workflow history:"));
+        assert!(view.contains("plan: 2 task(s) alpha,beta"));
+        assert!(
+            view.contains("review r1: reject applyReady=false blockers=1 files=2 — test failed")
+        );
+        assert!(view.contains("repair plan r2: tasks=beta retained_files=1"));
+        assert!(view.contains("review r2: approve applyReady=true blockers=0 files=2"));
+        assert!(view.contains("verify: ok=true guard=true"));
+        assert!(view.contains("[worktree] review batch-review-r1 decision=reject ok=false files=2 reviewers=0 category=patch_conflict message=error: patch failed: same.txt:1\\nerror: same.txt: patch does not apply"));
+        assert!(
+            view.contains(
+                "[workflow] done test-flow result ok=true decision=approve applyReady=true applied=4 failed=0 verifyGuard=true"
+            )
+        );
+        assert!(view.contains("[exit] status=completed"));
+        assert!(!view.contains("long evidence that should stay out"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_journals_show_failed_result_cause() {
+        let root = temp_root("run-journal-failure-cause");
+        let run_dir = root.join(".odw/runs/odw-run-failed");
+        fs::create_dir_all(&run_dir).unwrap();
+        let record = json!({
+            "run_id": "odw-run-failed",
+            "status": "failed",
+            "run_dir": run_dir,
+            "started_ms": 1000_u64,
+            "finished_ms": 1500_u64
+        });
+        fs::write(
+            root.join(".odw/runs/latest.json"),
+            serde_json::to_string_pretty(&record).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("run.json"),
+            serde_json::to_string_pretty(&record).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("events.jsonl"),
+            [
+                r#"{"type":"workflow_done","name":"test-flow","result":{"ok":false,"error":{"category":"planning_failed","message":"Planner did not return tasks"}}}"#,
+                r#"{"type":"exit","status":"failed"}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("state.json"),
+            serde_json::to_string_pretty(&json!({
+                "result": {
+                    "ok": false,
+                    "error": {
+                        "category": "planning_failed",
+                        "message": "Planner did not return tasks"
+                    }
+                },
+                "activeAgents": {},
+                "agents": {},
+                "failedAgents": {},
+                "checkpoints": {}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let shown = runs_show_report(&root, "latest", 5).unwrap();
+        let view = format_runs_show_view(&shown);
+        assert!(view.contains("Failure: planning_failed: Planner did not return tasks"));
+        assert_eq!(
+            format_result_failure_cause(
+                &json!({"ok": false, "error": "no captured worktree changes"})
+            ),
+            Some("no captured worktree changes".to_string())
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn run_journals_list_newest_first() {
+        let root = temp_root("run-journal-order");
+        let runs_dir = root.join(".odw/runs");
+        fs::create_dir_all(&runs_dir).unwrap();
+
+        for (run_id, started_ms) in [
+            ("odw-exec-1000-1", None),
+            ("odw-exec-3000-1", None),
+            ("custom-run", Some(2000_u64)),
+        ] {
+            let run_dir = runs_dir.join(run_id);
+            fs::create_dir_all(&run_dir).unwrap();
+            let mut record = json!({
+                "run_id": run_id,
+                "status": "completed",
+                "run_dir": run_dir
+            });
+            if let Some(started_ms) = started_ms {
+                record["started_ms"] = json!(started_ms);
+            }
+            fs::write(
+                run_dir.join("run.json"),
+                serde_json::to_string_pretty(&record).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let list = runs_list_report(&root).unwrap();
+        let run_ids = list["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| run["run_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            run_ids,
+            vec!["odw-exec-3000-1", "custom-run", "odw-exec-1000-1"]
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2157,7 +2917,6 @@ return result;
             model: None,
             effort: "low".to_string(),
             timeout: "120".to_string(),
-            codexctl_bin: "codexctl".to_string(),
             pandacode_bin: "pandacode".to_string(),
             json: false,
             dry_run: false,
@@ -2222,7 +2981,6 @@ return { ok: true };
             model: None,
             effort: "low".to_string(),
             timeout: "120".to_string(),
-            codexctl_bin: "codexctl".to_string(),
             pandacode_bin: "pandacode".to_string(),
             json: false,
             dry_run: false,
@@ -2232,6 +2990,110 @@ return { ok: true };
         assert!(result.is_err());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prune_runs_keeps_most_recent_and_protected() {
+        let runs = temp_root("prune-runs");
+        fs::create_dir_all(&runs).unwrap();
+        // Lexical order of these names is chronological (fixed-width stamp).
+        for i in 0..5 {
+            fs::create_dir_all(runs.join(format!("odw-exec-1000000000{i}-0"))).unwrap();
+        }
+        // Keep the 2 newest, but protect one that would otherwise be pruned.
+        let protect = runs.join("odw-exec-10000000002-0");
+        prune_runs_keeping(&runs, 2, &[protect.as_path()]);
+        let remaining: Vec<String> = sorted_dirs(&runs)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(remaining.len(), 3, "expected 2 newest + 1 protected");
+        assert!(remaining.contains(&"odw-exec-10000000004-0".to_string()));
+        assert!(remaining.contains(&"odw-exec-10000000003-0".to_string()));
+        assert!(remaining.contains(&"odw-exec-10000000002-0".to_string())); // protected
+        assert!(!remaining.contains(&"odw-exec-10000000000-0".to_string()));
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn prune_runs_skips_active_and_fresh_incomplete_runs() {
+        let runs = temp_root("prune-active-runs");
+        fs::create_dir_all(&runs).unwrap();
+        let now = now_millis() as u64;
+        for i in 0..5 {
+            let run_id = format!("odw-exec-1000000000{i}-0");
+            let run_dir = runs.join(&run_id);
+            fs::create_dir_all(&run_dir).unwrap();
+            let status = if i == 2 { "running" } else { "completed" };
+            let started_ms = if i == 2 { now } else { 1000000000 + i };
+            fs::write(
+                run_dir.join("run.json"),
+                serde_json::to_string_pretty(&json!({
+                    "run_id": run_id,
+                    "status": status,
+                    "started_ms": started_ms
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        prune_runs_keeping(&runs, 2, &[]);
+        let remaining: Vec<String> = sorted_dirs(&runs)
+            .unwrap()
+            .into_iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(remaining.len(), 3, "expected 2 newest + 1 active");
+        assert!(remaining.contains(&"odw-exec-10000000004-0".to_string()));
+        assert!(remaining.contains(&"odw-exec-10000000003-0".to_string()));
+        assert!(remaining.contains(&"odw-exec-10000000002-0".to_string())); // active
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn run_dir_prunable_protects_fresh_incomplete_dirs() {
+        let runs = temp_root("prune-fresh-incomplete");
+        fs::create_dir_all(&runs).unwrap();
+        let now = now_millis() as u64;
+        let fresh = runs.join(format!("odw-exec-{now}-0"));
+        let old = runs.join("odw-exec-10000000000-0");
+        fs::create_dir_all(&fresh).unwrap();
+        fs::create_dir_all(&old).unwrap();
+
+        assert!(!run_dir_prunable(&fresh, now));
+        assert!(run_dir_prunable(&old, now));
+        fs::remove_dir_all(&runs).unwrap();
+    }
+
+    #[test]
+    fn run_dir_prunable_protects_fresh_terminal_dirs() {
+        let runs = temp_root("prune-fresh-terminal");
+        fs::create_dir_all(&runs).unwrap();
+        let now = now_millis() as u64;
+        let fresh = runs.join(format!("odw-exec-{now}-0"));
+        let old = runs.join("odw-exec-10000000000-0");
+        fs::create_dir_all(&fresh).unwrap();
+        fs::create_dir_all(&old).unwrap();
+        let cases = [(&fresh, now, now), (&old, 10000000000, 10000000001)];
+        for (dir, started_ms, finished_ms) in cases {
+            fs::write(
+                dir.join("run.json"),
+                serde_json::to_string_pretty(&json!({
+                    "run_id": dir.file_name().unwrap().to_string_lossy(),
+                    "status": "completed",
+                    "started_ms": started_ms,
+                    "finished_ms": finished_ms
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        assert!(!run_dir_prunable(&fresh, now));
+        assert!(run_dir_prunable(&old, now));
+        fs::remove_dir_all(&runs).unwrap();
     }
 
     fn temp_root(name: &str) -> PathBuf {

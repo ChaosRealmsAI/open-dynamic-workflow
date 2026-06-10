@@ -8,6 +8,7 @@ for the full self-contained usage guide, then write a workflow script and run it
 
 ```bash
 odw guide                                                 # how to author + run (self-contained)
+odw starter parallel-review-apply > wf.js                 # reusable large-project workflow
 odw exec --script wf.js --input-file input.json --backend pandacode
 odw exec --resume latest
 odw runs show latest
@@ -32,10 +33,10 @@ Agent or CLI caller
   -> pandacode claude|codex|bamboo exec
 ```
 
-Claude Code remains an optional caller and compatibility surface through `/odw`
-and `/workflows`. It is not required for the core path. Worker failures are also
-part of the contract: failed workers return structured error feedback instead of
-unclassified prose.
+Claude Code, Codex, shell scripts, CI, or another agent can call the same CLI and
+workflow files. ODW itself does not install slash commands or project files.
+Worker failures are also part of the contract: failed workers return structured
+error feedback instead of unclassified prose.
 
 ODW is a pure orchestration runtime: the only executor backend is `pandacode`
 (plus `mock` for token-free smoke tests). All Codex/Claude/Bamboo execution —
@@ -64,6 +65,7 @@ The binary is self-documenting, so any agent can use it straight from the CLI:
 
 ```bash
 odw guide                       # the full self-contained authoring + run guide (read this first)
+odw starter --list              # built-in workflow templates
 odw doctor                      # check node + the pandacode executor are wired up
 odw spec | odw contract         # machine-readable API types + the authoring contract
 ```
@@ -167,18 +169,30 @@ If blocked or failed, return .odw/schemas/error-feedback.schema.json.
 ));
 ```
 
-## Claude Usage
+## External Agent Usage
 
-Inside Claude Code:
+Any agent can use ODW through the CLI. The reliable bootstrap is:
 
-```text
-/odw-audit src/routes for missing auth checks
-/odw-ship implement the agreed billing permission fix
-/odw-flow decompose this feature into parallel Codex tasks
+```bash
+odw guide
+odw starter parallel-review-apply > wf.js
+odw exec --script wf.js --input-file input.json --backend pandacode
 ```
 
-Claude should load `.odw/framework/workflow-api.d.ts` and write or adapt a
-workflow with this shape:
+The built-in starter is the large-project path: parallel Codex worktrees,
+candidate-worktree review, bounded repair/re-review, approve-only atomic
+landing, and read-only final verification. It repairs failed implementation
+nodes or cross-owned file edits before review; declare each task with `task.file`
+or `task.files` when you want maximum control. For lower decision cost, pass a
+high-level `request` or `spec` without `tasks`; the starter first asks a
+structured planner to produce owned task files, then runs the same preflight,
+review, apply, and verification gates. Set `strictTaskFileBoundaries:false` only
+with explicit owner intent. It also refuses to run when declared task files are
+already dirty, because isolated worktrees branch from `HEAD`; commit/stash those
+files first or pass `allowDirtyTaskFiles:true` only when the owner accepts that
+workers will not see the dirty changes.
+
+Then write or adapt a workflow with this shape:
 
 ```js
 phase("Research", "read files");
@@ -246,7 +260,7 @@ agent(...))`.
   bamboo are unreliable at structured output). If `schema` is omitted, ODW applies
   no default schema.
 - `error feedback`: `.odw/schemas/error-feedback.schema.json` is the standard
-  result when a worker, command, schema, or CodexCTL step fails.
+  result when a worker, command, schema, or Codex step fails.
 
 `odw-orchestrator` plans and routes. The workflow script owns executable
 branching, fan-out, loops, intermediate state, and final aggregation.
@@ -254,14 +268,14 @@ branching, fan-out, loops, intermediate state, and final aggregation.
 ## Lifecycle
 
 - run: `odw exec --script <workflow.js> --input <json> --backend <mock|pandacode>`
-- optional Claude run: `/odw`, `/odw-audit`, `/odw-ship`, `/odw-flow`
-- watch: `odw runs show latest`; optional Claude watch: `/workflows`
+- watch: `odw runs show latest`
 - pause/resume: `odw exec --resume latest`
-- stop: stop the invoking process, or use `/workflows` for Claude-launched runs
+- stop: stop the invoking process
 - restart node: direct exec resumes by the stable `prompt + options` cache key;
   completed nodes are skipped from state (editing a node's prompt re-runs it)
 - live logs: `odw exec` streams node progress
-- local journals: `odw runs list` and `odw runs show latest`
+- local journals: `odw runs list` and `odw runs show latest`; use
+  `odw runs list --json` for the raw machine-readable list
 
 ## CLI
 
@@ -275,7 +289,8 @@ odw exec --script wf.js --input '{"goal":"x"}' --backend mock   # token-free dry
 odw exec --script wf.js --backend pandacode          # real run
 odw exec --resume latest
 odw report --script wf.js --open                     # HTML execution-graph preview
-odw runs list
+odw runs list                                      # compact run list
+odw runs list --json                               # raw run records
 odw runs show latest
 ```
 
@@ -350,7 +365,11 @@ runtime behaviors:
 - **`isolation: "worktree"`.** Set it on an `agent(...)` node to run its executor
   in a throwaway git worktree branched from `cwd`, so file-mutating agents in a
   `parallel(...)` group do not conflict. The worktree is removed on success,
-  error, or timeout. Requires `cwd` to be a git repo.
+  error, or timeout. Requires `cwd` to be a git repo. Captured diffs can be
+  reviewed with `reviewWorktreeDiffs(results)` before landing; reviewers run in a
+  temporary candidate worktree where the combined diff is already applied. Land
+  only an `approve` gate with `applyWorktreeDiffs(results)`, which is atomic by
+  default.
 - **Real `budget`.** Seed `args.budget.total` (tokens). `budget.spent()` sums
   each node's **total** token usage (input + output + cache + reasoning) from
   PandaCode reports. **This differs from the built-in tool, whose `spent()` counts
@@ -432,18 +451,19 @@ Honest tradeoffs — reach for the built-in Workflow when these matter:
 Implemented now:
 
 - Rust CLI named `odw`
-- Open Dynamic Workflow project pack installer
 - direct workflow script contract
 - direct JavaScript runner through `odw exec`
 - prompt-slot injection for node prompts
 - complex flow starter with dynamic fan-out, join, parallel review, quality gate,
   and bounded rework loop
+- reusable large-project example: parallel Codex worktrees → candidate-workspace
+  review gate → approve-only atomic landing → read-only verification guard
 - framework `.d.ts` and runtime contract docs
-- project-level Claude Code agent types
-- slash commands and starter workflow scripts
+- built-in `odw starter parallel-review-apply`
 - worker output schemas
-- saved workflow artifact evidence reader
 - live run journals under `.odw/runs`
+- compact `odw runs show` summaries with report paths
+- self-contained HTML execution reports
 - checkpointed direct resume with `odw exec --resume`
 - single-shot Codex execution through PandaCode (`runtime: "codex"`)
 - Bamboo provider dispatch through PandaCode (`runtime: "bamboo", provider`)

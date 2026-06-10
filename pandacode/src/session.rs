@@ -54,7 +54,10 @@ pub fn save(root: &Path, record: &mut SessionRecord) -> Result<()> {
     let dir = runtime_dir(root, &record.runtime);
     fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     let path = record_path(root, &record.runtime, &record.session);
-    write_atomic(&path, &format!("{}\n", serde_json::to_string_pretty(record)?))?;
+    write_atomic(
+        &path,
+        &format!("{}\n", serde_json::to_string_pretty(record)?),
+    )?;
     let pointer = format!(
         "{}\n",
         serde_json::to_string_pretty(&json!({
@@ -195,13 +198,6 @@ pub fn artifacts(root: &Path, runtime: &str, session: &str) -> Result<serde_json
     }))
 }
 
-pub fn require_run_id(record: &SessionRecord) -> Result<String> {
-    record
-        .run_id
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("session {} has no codex run_id", record.session))
-}
-
 fn runtime_dir(root: &Path, runtime: &str) -> PathBuf {
     pandacode_dir(root).join("sessions").join(runtime)
 }
@@ -232,7 +228,7 @@ mod tests {
     fn saves_and_resolves_latest() {
         let root = std::env::temp_dir().join(format!("pandacode-session-test-{}", now_millis()));
         fs::create_dir_all(&root).unwrap();
-        let mut record = SessionRecord::new("codex", "s1", "codexctl", &root);
+        let mut record = SessionRecord::new("codex", "s1", "codex-appserver", &root);
         save(&root, &mut record).unwrap();
         assert_eq!(resolve_session(&root, "codex", "latest").unwrap(), "s1");
         assert_eq!(load(&root, "codex", "latest").unwrap().session, "s1");
@@ -261,6 +257,9 @@ mod tests {
         assert!(p.starts_with(&dir), "escaped runtime dir: {}", p.display());
         assert!(!p.to_string_lossy().contains("/etc/passwd"));
         // A normal session still maps to <session>.json under the runtime dir.
-        assert_eq!(record_path(root, "claude", "abc-1.2"), dir.join("abc-1.2.json"));
+        assert_eq!(
+            record_path(root, "claude", "abc-1.2"),
+            dir.join("abc-1.2.json")
+        );
     }
 }

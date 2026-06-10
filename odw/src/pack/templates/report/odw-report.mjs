@@ -43,6 +43,8 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family
 .kv .v{color:var(--ink);font-family:ui-monospace,Menlo,monospace;font-size:12.5px;word-break:break-word}
 .kv .v.ok{color:var(--ok)}.kv .v.fail{color:var(--fail)}
 .prompt{background:#0a0b0f;border:1px solid var(--line);border-radius:10px;padding:14px 15px;font-size:12.5px;line-height:1.7;color:var(--ink2);white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,monospace;max-height:46vh;overflow:auto}
+.history{margin:0;padding:0;list-style:none;display:grid;gap:8px}
+.history li{border:1px solid var(--line);border-radius:8px;background:#0b0d13;padding:9px 11px;color:var(--ink2);font-size:12.5px;line-height:1.45}
 .empty{color:var(--dim);font-size:13px}
 </style></head><body>
 <div class="top"><span class="ttl">__TITLE__</span><span class="sub">__SUBTITLE__</span></div>
@@ -64,7 +66,15 @@ function row(k,v,cls){return '<div class="k">'+k+'</div><div class="v'+(cls?' '+
 function detail(n){
  let h='<a class="back" onclick="showOverview()">‹ overview</a>';
  h+='<div class="dname">'+esc(n.label)+'</div>';
- h+='<div class="dkind">'+(n.kind==='ai'?'agent() node':'code')+(n.stage?' · '+esc(n.stage):'')+'</div>';
+ h+='<div class="dkind">'+(n.kind==='ai'?'agent() node':(n.kind==='event'?'workflow event':'code'))+(n.stage?' · '+esc(n.stage):'')+'</div>';
+ if(n.kind==='event'){
+   const ev=n.event||{};
+   let rows='';
+   for(const [k,v] of Object.entries(ev)){ rows+=row(k,typeof v==='object'?JSON.stringify(v):v,(k==='ok'&&v===false)?'fail':((k==='ok'||k==='applied'||k==='applyReady')&&v===true?'ok':'')); }
+   h+='<div class="lab">event</div><div class="kv">'+(rows||'<div class="k">—</div><div class="v">(empty)</div>')+'</div>';
+   if(n.raw) h+='<div class="lab">raw</div><div class="prompt">'+esc(JSON.stringify(n.raw,null,2))+'</div>';
+   return h;
+ }
  if(n.kind!=='ai'){h+='<div class="empty">Orchestration step (parallel / pipeline fan-out / join / start / end) — emitted by the workflow code, not an AI call.</div>';return h;}
  // config straight from the code
  const cfg=n.config||{};
@@ -90,11 +100,15 @@ function showOverview(){
  let h='<div class="dname">'+esc(o.name)+'</div><div class="dkind">'+esc(o.subtitle)+'</div>';
  h+='<div class="lab">run</div><div class="kv">'+
    row('backend',o.backend)+row('status',o.status,o.failed?'fail':'ok')+
-   row('agent nodes',num(o.ai))+row('total tokens',num(o.tokens)+(o.approx?' (≥)':''))+'</div>';
+   row('agent nodes',num(o.ai))+row('review gates',num(o.gates))+row('apply events',num(o.applies))+
+   row('total tokens',num(o.tokens)+(o.approx?' (≥)':''))+'</div>';
  if(o.modelTokens&&o.modelTokens.length){
    h+='<div class="lab" style="margin-top:22px">tokens by model</div><div class="kv">'+
      o.modelTokens.map(([m,t])=>row(m,num(t))).join('')+'</div>';}
- h+='<div class="lab" style="margin-top:22px">tip</div><div class="empty">Click any node to see its config and prompt as written in the workflow code.</div>';
+ if(o.history&&o.history.length){
+   h+='<div class="lab" style="margin-top:22px">workflow history</div><ol class="history">'+
+     o.history.map((line)=>'<li>'+esc(line)+'</li>').join('')+'</ol>';}
+ h+='<div class="lab" style="margin-top:22px">tip</div><div class="empty">Click any agent, review gate, workspace, or apply node to inspect the exact runtime evidence.</div>';
  document.getElementById('detail').innerHTML=h;}
 function fitGraph(){const svg=document.querySelector('.graph svg'),g=document.querySelector('.graph');
  if(!svg||!g)return;const vb=svg.viewBox&&svg.viewBox.baseVal;if(!vb||!vb.width)return;
@@ -133,6 +147,55 @@ const nodes = {};
 const order = [];
 let codeSeq = 0;
 function addCode(id, label, term = false) { nodes[id] = { id, kind: "code", label, term }; order.push(id); return id; }
+function eventFields(ev) {
+  const fields = { type: ev.type };
+  for (const key of [
+    "label",
+    "status",
+    "decision",
+    "ok",
+    "applyReady",
+    "applied",
+    "files",
+    "file_samples",
+    "reviewers",
+    "review_decisions",
+    "blockers",
+    "blocker_samples",
+    "risks",
+    "risk_samples",
+    "owner_questions",
+    "owner_question_samples",
+    "verification_samples",
+    "added",
+    "removed",
+    "modified",
+    "restored",
+    "category",
+    "message"
+  ]) {
+    if (ev[key] !== undefined) fields[key] = ev[key];
+  }
+  return fields;
+}
+function addEvent(label, ev) {
+  codeSeq += 1;
+  const id = `event${codeSeq}`;
+  nodes[id] = {
+    id,
+    kind: "event",
+    label,
+    eventType: ev.type,
+    event: eventFields(ev),
+    raw: ev,
+    ok: ev.ok,
+    status: ev.ok === false ? "failed" : "ok"
+  };
+  order.push(id);
+  link(tail, id);
+  tail = id;
+  return id;
+}
 const startId = addCode("start", "start", true);
 const edges = [];
 const link = (a, b) => { if (a && b) edges.push([a, b]); };
@@ -174,6 +237,20 @@ for (const ev of events) {
   } else if (t === "agent_skip") {
     if (!nodes[ev.key]) { nodes[ev.key] = { id: ev.key, kind: "ai", label: ev.label || ev.key, stage: ev.phase || "", config: ev.config || {}, prompt: "", status: "skip", tokens: null, durationMs: null }; order.push(ev.key); const g = groups[groups.length - 1]; if (g) { link(g.forkId, ev.key); g.children.push(ev.key); } else { link(tail, ev.key); tail = ev.key; } }
     else nodes[ev.key].status = "skip";
+  } else if (t === "worktree_review_workspace") {
+    addEvent(`review workspace ${ev.status || ""}`.trim(), ev);
+  } else if (t === "worktree_review_gate") {
+    addEvent(`gate: ${ev.decision || "review"}`, ev);
+  } else if (t === "worktree_patch_apply") {
+    const suffix = ev.applied ? "applied" : (ev.ok === false ? "failed" : "checked");
+    addEvent(`apply ${suffix}`, ev);
+  } else if (t === "worktree_snapshot_check") {
+    addEvent(`snapshot: ${ev.ok === false ? "changed" : "clean"}`, ev);
+  } else if (t === "worktree_snapshot_restore") {
+    addEvent(`snapshot restore: ${ev.ok === false ? "failed" : "ok"}`, ev);
+  } else if (t === "log") {
+    const message = String(ev.message || "").trim();
+    addEvent(`log: ${message.slice(0, 32) || "message"}`, ev);
   }
 }
 const endId = addCode("end", "end", true);
@@ -204,7 +281,61 @@ const modelTokens = Object.entries(byModel).filter(([, t]) => t > 0).sort((a, b)
 // always adds up to "total tokens" instead of silently falling short.
 const attributed = modelTokens.reduce((s, [, t]) => s + t, 0);
 if (totalTokens > attributed) modelTokens.push(["other (retries/overhead)", totalTokens - attributed]);
-const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: Boolean(wfErr) || aiNodes.some((n) => n.status === "failed"), ai: aiNodes.length, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx), modelTokens };
+const eventNodes = order.map((id) => nodes[id]).filter((n) => n.kind === "event");
+const reviewGateCount = eventNodes.filter((n) => n.eventType === "worktree_review_gate").length;
+const applyEventCount = eventNodes.filter((n) => n.eventType === "worktree_patch_apply").length;
+const workflowHistory = Array.isArray(state.result?.history)
+  ? state.result.history.map(formatHistoryItem).filter(Boolean).slice(0, 12)
+  : [];
+const workflowFailed = Boolean(wfErr)
+  || Boolean(wfDone && wfDone.result && wfDone.result.ok === false)
+  || Boolean(!wfDone && (aiNodes.some((n) => n.status === "failed") || eventNodes.some((n) => n.ok === false)));
+const overview = { name, subtitle: `${backend} · ${aiNodes.length} nodes`, backend, status, failed: workflowFailed, ai: aiNodes.length, gates: reviewGateCount, applies: applyEventCount, tokens: totalTokens, approx: Boolean(state.budget && state.budget.approx), modelTokens, history: workflowHistory };
+
+function truncateText(value, max) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > max ? text.slice(0, Math.max(0, max - 1)) + "…" : text;
+}
+function historyTasks(item) {
+  const tasks = Array.isArray(item?.tasks) ? item.tasks : [];
+  return tasks.map((task) => typeof task === "string" ? task : task?.id).filter(Boolean);
+}
+function historyArrayLen(item, key) {
+  return Array.isArray(item?.[key]) ? item[key].length : 0;
+}
+function historyFirstText(item, key, maxChars = 180) {
+  const values = Array.isArray(item?.[key]) ? item[key] : [];
+  const first = values.find((value) => typeof value === "string" && value.trim());
+  return first ? ` — ${truncateText(first, maxChars)}` : "";
+}
+function formatHistoryItem(item) {
+  const step = item?.step;
+  const round = item?.round || 1;
+  const tasks = historyTasks(item);
+  const files = historyArrayLen(item, "files");
+  const blockers = historyArrayLen(item, "blockers");
+  if (step === "plan") {
+    const summary = item.summary ? ` — ${truncateText(item.summary, 120)}` : "";
+    return `plan: ${tasks.length} task(s) ${truncateText(tasks.join(","), 120)}${summary}`;
+  }
+  if (step === "implement") return `implement r${round}: ${tasks.length} task(s), ${files} file(s)`;
+  if (step === "pre_review_block") {
+    return `pre-review block r${round}: failed=${historyArrayLen(item, "failed_tasks")} scope_issues=${historyArrayLen(item, "scope_issues")}`;
+  }
+  if (step === "review") {
+    return `review r${round}: ${item.decision || "unknown"} applyReady=${Boolean(item.applyReady)} blockers=${blockers} files=${files}${historyFirstText(item, "blockers")}`;
+  }
+  if (step === "repair_plan") {
+    return `repair plan r${round}: tasks=${truncateText(tasks.join(","), 120)} retained_files=${historyArrayLen(item, "retained_files")}`;
+  }
+  if (step === "repair") {
+    return `repair r${round}: tasks=${truncateText(tasks.join(","), 120)} files=${files} candidate_files=${historyArrayLen(item, "candidate_files")}`;
+  }
+  if (step === "verify") {
+    return `verify: ok=${Boolean(item.ok)} guard=${Boolean(item.guard?.ok)}`;
+  }
+  return step ? `${step}${item.round ? ` r${item.round}` : ""}` : null;
+}
 
 // ---- mermaid (uncoloured) -------------------------------------------------
 const safe = (id) => "n_" + String(id).replace(/[^a-zA-Z0-9_]/g, "_");
@@ -214,12 +345,19 @@ function mermaid() {
     const n = nodes[id];
     const lbl = String(n.label).replace(/"/g, "”").slice(0, 24);
     const shape = n.term ? `(["${lbl}"])` : (n.kind === "code" ? `{"${lbl}"}` : `("${lbl}")`);
-    const cls = n.kind === "ai" ? (n.status === "failed" ? "fail" : "node") : "code";
+    const cls = n.kind === "ai"
+      ? (n.status === "failed" ? "fail" : "node")
+      : (n.kind === "event"
+        ? (n.ok === false ? "fail" : (n.eventType === "worktree_review_gate" ? "gate" : (n.eventType === "worktree_patch_apply" ? "apply" : "event")))
+        : "code");
     L.push(`  ${safe(id)}${shape}:::${cls}`);
   }
   for (const [a, b] of edges) L.push(`  ${safe(a)} --> ${safe(b)}`);
   L.push("  classDef node fill:#161922,stroke:#586074,color:#e3e6ef,stroke-width:1.3px;");
   L.push("  classDef fail fill:#241317,stroke:#e0574b,color:#f3d2cf,stroke-width:1.3px;");
+  L.push("  classDef gate fill:#13201c,stroke:#35c79a,color:#d7fff2,stroke-width:1.35px;");
+  L.push("  classDef apply fill:#151d2d,stroke:#72a7ff,color:#e3efff,stroke-width:1.25px;");
+  L.push("  classDef event fill:#101825,stroke:#4a5366,color:#dbe2f0,stroke-width:1.15px;");
   L.push("  classDef code fill:#101218,stroke:#363a45,color:#9aa0b0,stroke-width:1.1px;");
   return L.join("\n");
 }
@@ -227,7 +365,7 @@ function mermaid() {
 const njson = {};
 for (const id of order) {
   const n = nodes[id];
-  njson[safe(id)] = { kind: n.kind, label: n.label, stage: n.stage, config: n.config || {}, prompt: n.prompt, status: n.status, tokens: n.tokens, durationMs: n.durationMs };
+  njson[safe(id)] = { kind: n.kind, label: n.label, stage: n.stage, config: n.config || {}, prompt: n.prompt, status: n.status, tokens: n.tokens, durationMs: n.durationMs, event: n.event, raw: n.raw };
 }
 
 const vendorRel = (file) => {

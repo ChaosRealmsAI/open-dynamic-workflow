@@ -42,13 +42,25 @@ pub enum Commands {
     Interrupt(AgentSessionCommandArgs),
     #[command(about = "Stop the latest or selected session")]
     Stop(AgentSessionCommandArgs),
+    #[command(
+        about = "Wait until the given sessions settle; succeed only when every session completes and every expected artifact exists"
+    )]
+    Wait(WaitCommandArgs),
+    #[command(
+        about = "Reclaim disk: prune PandaCode-owned prompts/logs/events/detached files older than --days (session records and Codex home are never touched)"
+    )]
+    Gc(GcCommandArgs),
     #[command(about = "Check runtimes and required local binaries")]
     Doctor(GlobalArgs),
     #[command(about = "List known PandaCode sessions for all runtimes")]
     List(GlobalArgs),
     #[command(about = "List models for all runtimes")]
     Models(GlobalArgs),
-    #[command(subcommand, about = "Run tasks through Codex app-server/control-plane")]
+    #[command(
+        subcommand,
+        about = "Run tasks directly through codex app-server (stdio JSON-RPC, no daemon)",
+        after_help = "Examples:\n  pandacode codex exec --task \"fix the failing tests\" --cd .\n  pandacode codex exec --detach --session build --task-file task.md   # background turn\n  pandacode codex status --session build        # live watch (state + last agent message)\n  pandacode codex answer --session build --choice 2   # answer a pending question\n  pandacode codex interrupt --session build     # abort the active turn\n  pandacode codex exec --auth-home ~/.codex-work --task \"...\"   # another account's auth, clean config\n  pandacode codex logs --session build --visible   # structured thread history\n  pandacode codex doctor                        # health + account + rate limits"
+    )]
     Codex(RuntimeCommand),
     #[command(subcommand, about = "Run tasks through Claude Code in tmux")]
     Claude(RuntimeCommand),
@@ -126,9 +138,13 @@ pub struct ClaudeHookArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct AnswerCommandArgs {
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
     #[arg(
         long,
@@ -145,9 +161,9 @@ pub struct AnswerCommandArgs {
     pub text: Option<String>,
     #[arg(long, help = "Wait for the runtime to continue after answering")]
     pub wait: bool,
-    #[arg(long)]
+    #[arg(long, help = "Wait timeout in milliseconds")]
     pub timeout_ms: Option<u64>,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -155,9 +171,13 @@ pub struct AnswerCommandArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct GlobalArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -165,19 +185,76 @@ pub struct GlobalArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct RuntimeGlobalArgs {
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
 }
 
 #[derive(Debug, Args, Clone)]
+pub struct WaitCommandArgs {
+    #[arg(
+        long = "session",
+        required = true,
+        value_name = "SESSION",
+        help = "Session id to wait for; repeat for multiple lanes"
+    )]
+    pub sessions: Vec<String>,
+    #[arg(long, default_value = ".", help = "Workspace directory")]
+    pub cd: PathBuf,
+    #[arg(
+        long,
+        default_value_t = 1_800_000,
+        help = "Overall wait timeout in milliseconds"
+    )]
+    pub timeout_ms: u64,
+    #[arg(long, default_value_t = 5_000, help = "Poll interval in milliseconds")]
+    pub interval_ms: u64,
+    #[arg(
+        long = "expect-artifact",
+        value_name = "PATH",
+        help = "File that must exist (relative to --cd) for the wait to succeed; repeat for multiple files"
+    )]
+    pub expect_artifact: Vec<PathBuf>,
+    #[arg(long, help = "Print machine-readable JSON")]
+    pub json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
+pub struct GcCommandArgs {
+    #[arg(long, default_value = ".", help = "Workspace directory")]
+    pub cd: PathBuf,
+    #[arg(
+        long,
+        default_value_t = 7,
+        help = "Delete PandaCode-owned prompt/log/event/detached files older than this many days"
+    )]
+    pub days: u64,
+    #[arg(
+        long,
+        help = "Report what would be deleted without removing anything"
+    )]
+    pub dry_run: bool,
+    #[arg(long, help = "Print machine-readable JSON")]
+    pub json: bool,
+}
+
+#[derive(Debug, Args, Clone)]
 pub struct AgentTaskCommandArgs {
     #[command(flatten)]
     pub common: TaskCommandArgs,
-    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto)]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = RuntimeSelector::Auto,
+        help = "Runtime to use; auto selects from model/provider hints"
+    )]
     pub runtime: RuntimeSelector,
     #[arg(
         long,
@@ -190,7 +267,7 @@ pub struct AgentTaskCommandArgs {
 pub struct AgentSessionCommandArgs {
     #[command(flatten)]
     pub common: SessionCommandArgs,
-    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto)]
+    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto, help = "Runtime to inspect")]
     pub runtime: RuntimeSelector,
 }
 
@@ -198,7 +275,7 @@ pub struct AgentSessionCommandArgs {
 pub struct AgentLogsCommandArgs {
     #[command(flatten)]
     pub common: LogsCommandArgs,
-    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto)]
+    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto, help = "Runtime to inspect")]
     pub runtime: RuntimeSelector,
 }
 
@@ -206,7 +283,7 @@ pub struct AgentLogsCommandArgs {
 pub struct AgentAnswerCommandArgs {
     #[command(flatten)]
     pub common: AnswerCommandArgs,
-    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto)]
+    #[arg(long, value_enum, default_value_t = RuntimeSelector::Auto, help = "Runtime to answer")]
     pub runtime: RuntimeSelector,
 }
 
@@ -217,17 +294,39 @@ pub struct TaskCommandArgs {
         help = "Read task from stdin when this positional is '-'"
     )]
     pub stdin: Option<String>,
-    #[arg(long, conflicts_with = "task_file")]
+    #[arg(long, conflicts_with = "task_file", help = "Inline task text")]
     pub task: Option<String>,
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", help = "Read task text from a file")]
     pub task_file: Option<PathBuf>,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        value_name = "TEXT|builtin:NAME|@FILE|file:PATH|text:TEXT",
+        help = "Append a prompt part after the task; repeat for multiple ordered parts. All runtimes resolve builtin:NAME (embedded role prompts), @FILE, file:PATH, and text:TEXT locally"
+    )]
+    pub prompt_append: Vec<String>,
+    #[arg(
+        long,
+        help = "Codex/Claude: return immediately and run the turn in a detached background worker; observe with status, block with `pandacode wait`, end with stop"
+    )]
+    pub detach: bool,
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Require this file to exist (relative to --cd) after a completed turn, otherwise the state becomes no_report; repeat for multiple files"
+    )]
+    pub expect_artifact: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Codex only: set a thread goal/objective before the turn starts"
+    )]
+    pub objective: Option<String>,
+    #[arg(long, default_value = ".", help = "Workspace directory")]
     pub cd: PathBuf,
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long)]
+    #[arg(long, help = "Model id for this turn")]
     pub model: Option<String>,
-    #[arg(long)]
+    #[arg(long, help = "Reasoning/effort level when supported")]
     pub effort: Option<Effort>,
     #[arg(
         long,
@@ -235,9 +334,9 @@ pub struct TaskCommandArgs {
         help = "Agent permission mode. New sessions default to max; resume inherits the stored mode unless set"
     )]
     pub permission: Option<PermissionMode>,
-    #[arg(long)]
+    #[arg(long, help = "Wait timeout in milliseconds")]
     pub timeout_ms: Option<u64>,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -257,11 +356,15 @@ pub struct BambooTaskCommandArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct SessionCommandArgs {
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -269,11 +372,15 @@ pub struct SessionCommandArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct LogsCommandArgs {
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 100, help = "Number of log lines to show")]
     pub tail: usize,
     #[arg(
         long,
@@ -281,7 +388,7 @@ pub struct LogsCommandArgs {
         help = "Claude only: capture the final visible viewport instead of scrollback tail"
     )]
     pub visible: bool,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -289,15 +396,24 @@ pub struct LogsCommandArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct ModelCommandArgs {
-    #[arg(long, default_value = "latest")]
+    #[arg(long, default_value = "latest", help = "Session id, or latest")]
     pub session: String,
-    #[arg(long, default_value = ".")]
+    #[arg(
+        long,
+        default_value = ".",
+        help = "Workspace directory for session state"
+    )]
     pub cd: PathBuf,
-    #[arg(long = "model", alias = "set", value_name = "MODEL")]
+    #[arg(
+        long = "model",
+        alias = "set",
+        value_name = "MODEL",
+        help = "Model id for the next turn"
+    )]
     pub model: String,
-    #[arg(long)]
+    #[arg(long, help = "Reasoning/effort level for the next turn when supported")]
     pub effort: Option<Effort>,
-    #[arg(long)]
+    #[arg(long, help = "Print machine-readable JSON")]
     pub json: bool,
     #[command(flatten)]
     pub bins: RuntimeBins,
@@ -440,8 +556,6 @@ pub struct BambooRunArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct RuntimeBins {
-    #[arg(long, hide = true, default_value = "codexctl")]
-    pub codexctl_bin: String,
     #[arg(long, hide = true, default_value = "codex")]
     pub codex_bin: String,
     #[arg(long, hide = true, default_value = "claude")]
@@ -450,16 +564,31 @@ pub struct RuntimeBins {
     pub tmux_bin: String,
     #[arg(long, hide = true, default_value = "summary")]
     pub log_mode: String,
+    #[arg(
+        long,
+        alias = "codex-auth-home",
+        value_name = "DIR",
+        conflicts_with = "codex_home",
+        help = "Codex account switch: copy auth material from this Codex home (e.g. ~/.codex-work) into PandaCode's managed clean home; that home's config/AGENTS.md/skills are NOT loaded"
+    )]
+    pub auth_home: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Use this full Codex home as-is (loads its config, rules, and session storage). Prefer --auth-home for plain account switching"
+    )]
+    pub codex_home: Option<PathBuf>,
 }
 
 impl Default for RuntimeBins {
     fn default() -> Self {
         Self {
-            codexctl_bin: "codexctl".to_string(),
             codex_bin: "codex".to_string(),
             claude_bin: "claude".to_string(),
             tmux_bin: "tmux".to_string(),
             log_mode: "summary".to_string(),
+            auth_home: None,
+            codex_home: None,
         }
     }
 }

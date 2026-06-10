@@ -1,12 +1,20 @@
-use std::{
-    collections::hash_map::DefaultHasher,
-    fs,
-    hash::{Hash, Hasher},
-    path::{Path, PathBuf},
-};
+//! Codex runtime driven directly through `codex app-server` over stdio.
+//!
+//! Each turn spawns one app-server process, starts or resumes a thread, runs
+//! `turn/start`, and waits for `turn/completed`. Thread state persists as
+//! Codex rollout files, so resume works across processes without a daemon.
+//!
+//! `--detach` re-execs pandacode as a background worker that owns the live
+//! app-server for the whole turn. The worker keeps the session record fresh
+//! (status/last message/usage), waits in-protocol on `requestUserInput` so
+//! `answer` can reply inside the same turn, and honors `interrupt` through a
+//! control file.
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     cli::{
@@ -14,22 +22,22 @@ use crate::{
         RuntimeCommand, RuntimeGlobalArgs, SessionCommandArgs, TaskCommandArgs,
     },
     io::{
-        command_report, generated_session, output_json, pandacode_dir, parse_json_or_null,
-        run_capture, structured_log_tail, tail, workspace, write_prompt_file,
+        BUILTIN_PROMPTS, generated_session, output_json, pandacode_dir, sanitize_name, workspace,
+        write_prompt_file,
     },
-    session::{self, SessionRecord, require_run_id},
+    session::{self, SessionRecord},
 };
-use serde_json::Value;
+
+use super::codex_appserver::{
+    self, AppServerClient, kill_process_group, notification_method, server_request_id,
+};
 
 const RUNTIME: &str = "codex";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_EFFORT: &str = "xhigh";
-
-#[derive(Debug, Clone)]
-struct CodexControl {
-    log_dir: PathBuf,
-    session_socket: PathBuf,
-}
+const DEFAULT_TIMEOUT_MS: u64 = 1_200_000;
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+const POLL_SLICE: Duration = Duration::from_millis(300);
 
 pub fn run(command: RuntimeCommand) -> Result<()> {
     match command {
@@ -48,6 +56,16 @@ pub fn run(command: RuntimeCommand) -> Result<()> {
     }
 }
 
+#[derive(Default)]
+struct TurnOutcome {
+    state: String,
+    agent_messages: Vec<String>,
+    usage: Option<Value>,
+    questions: Vec<Value>,
+    completed: Option<Value>,
+    errors: Vec<Value>,
+}
+
 fn exec(args: TaskCommandArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
     let task = crate::io::read_task(
@@ -56,135 +74,99 @@ fn exec(args: TaskCommandArgs) -> Result<()> {
         args.stdin.as_deref(),
         Some(&root),
     )?;
+    let task = crate::io::apply_prompt_parts(&task, &args.prompt_append, Some(&root))?;
     let session_name = if args.session == "latest" {
         generated_session(RUNTIME)
     } else {
-        crate::io::sanitize_name(&args.session, RUNTIME)
+        sanitize_name(&args.session, RUNTIME)
     };
     let model = effective_model(args.model.as_deref(), None);
     let effort = effective_effort(args.effort, None);
     let permission = effective_permission(args.permission, None);
-    let prompt_file = write_prompt_file(&root, RUNTIME, &session_name, &task)?;
-    let dispatch_prompt = crate::io::dispatch_task_for_transport(&task, &prompt_file);
-    let dispatch_prompt_file = if let Some(dispatch_prompt) = dispatch_prompt.as_deref() {
-        write_prompt_file(
+    if args.detach {
+        return spawn_detached_worker(
+            "exec",
             &root,
-            RUNTIME,
-            &format!("{}-dispatch", session_name),
-            dispatch_prompt,
-        )?
-    } else {
-        prompt_file.clone()
-    };
-    let (control, command, output, transport_retries) = run_codex_start_with_retry(
-        &root,
-        &session_name,
-        &args,
-        &dispatch_prompt_file,
-        &model,
-        &effort,
-    )?;
-    let raw = parse_json_or_null(&output.stdout);
-    let mut record = SessionRecord::new(RUNTIME, &session_name, "codexctl-session", &root);
-    update_record_ids(&mut record, raw.as_ref());
+            &session_name,
+            &task,
+            &args,
+            &model,
+            &effort,
+            permission,
+        );
+    }
+    let prompt_file = write_prompt_file(&root, RUNTIME, &session_name, &task)?;
+    let log_path = appserver_log_path(&root, &session_name);
+
+    let mut record = SessionRecord::new(RUNTIME, &session_name, "codex-appserver", &root);
     record.model = Some(model.clone());
     record.effort = Some(effort.clone());
     record.permission = Some(permission.as_value().to_string());
     record.artifacts = json!({
         "prompt_file": prompt_file,
-        "dispatch_prompt_file": dispatch_prompt_file,
-        "transport": if dispatch_prompt.is_some() { "file_reference" } else { "direct" },
-        "transport_retries": transport_retries,
-        "log_dir": control.log_dir.to_string_lossy().to_string(),
-        "session_socket": control.session_socket.to_string_lossy().to_string()
+        "log_path": log_path,
+        "status": "starting",
+        "runner_pid": std::process::id(),
+        "detached": crate::io::detached_worker(),
+        "expected_artifacts": args.expect_artifact,
     });
-    let start_report = command_summary(
-        output.ok,
-        "start",
-        Some(&record.session),
-        &command,
-        &output,
-        raw.as_ref(),
-    );
-    let (ok, state, final_summary, execute_report) = if output.ok {
-        if let Some(run_id) = record.run_id.as_deref() {
-            if is_needs_input(raw.as_ref()) {
-                set_pending_stage(&mut record, Some("start"));
-                (
-                    false,
-                    codex_state(raw.as_ref()),
-                    codex_output_summary(raw.as_ref()),
-                    json!(null),
-                )
-            } else {
-                let execute_command = codex_execute_command(
-                    &args.bins,
-                    run_id,
-                    &dispatch_prompt_file,
-                    &control,
-                    &args,
-                    &model,
-                    &effort,
-                );
-                let execute_output = run_capture(&execute_command, Some(&root))?;
-                let execute_raw = parse_json_or_null(&execute_output.stdout);
-                update_record_ids(&mut record, execute_raw.as_ref());
-                if is_needs_input(execute_raw.as_ref()) {
-                    set_pending_stage(&mut record, Some("execute"));
-                } else {
-                    set_pending_stage(&mut record, None);
-                }
-                let summary = codex_output_summary(execute_raw.as_ref().or(raw.as_ref()));
-                (
-                    execute_output.ok && !is_needs_input(execute_raw.as_ref()),
-                    codex_state(execute_raw.as_ref().or(raw.as_ref())),
-                    summary,
-                    command_summary(
-                        execute_output.ok,
-                        "execute",
-                        Some(&record.session),
-                        &execute_command,
-                        &execute_output,
-                        execute_raw.as_ref(),
-                    ),
-                )
-            }
-        } else {
-            (
-                false,
-                "failed".to_string(),
-                codex_output_summary(raw.as_ref()),
-                json!({
-                    "ok": false,
-                    "runtime": RUNTIME,
-                    "action": "execute",
-                    "session": record.session,
-                    "error": "codexctl session start did not return run_id"
-                }),
-            )
-        }
-    } else {
-        (
-            false,
-            codex_state(raw.as_ref()),
-            codex_output_summary(raw.as_ref()),
-            json!(null),
-        )
-    };
     session::save(&root, &mut record)?;
 
-    let mut report = json!({
-        "ok": ok,
-        "runtime": RUNTIME,
-        "action": "exec",
-        "session": record.session,
-        "state": state,
-        "start": start_report,
-        "execute": execute_report,
-        "summary": final_summary
-    });
-    report["record"] = serde_json::to_value(record)?;
-    output_json(&report)
+    let mut client =
+        codex_appserver::spawn_initialized(&args.bins, &root, Some(log_path.clone()))?;
+    let start = client.call(
+        "thread/start",
+        json!({
+            "cwd": root.to_string_lossy(),
+            "approvalPolicy": approval_policy(permission),
+            "sandbox": sandbox_policy(permission),
+            "experimentalRawEvents": false,
+            "persistExtendedHistory": true,
+            "model": model,
+        }),
+        CALL_TIMEOUT,
+    )?;
+    record.thread_id = start
+        .pointer("/result/thread/id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    record.thread_path = start
+        .pointer("/result/thread/path")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let thread_model = start
+        .pointer("/result/model")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| model.clone());
+    let thread_id = record
+        .thread_id
+        .clone()
+        .context("thread/start response missing result.thread.id")?;
+    if let Some(objective) = &args.objective {
+        let goal = client.call(
+            "thread/goal/set",
+            json!({ "threadId": thread_id, "objective": objective, "status": "active" }),
+            CALL_TIMEOUT,
+        )?;
+        record.artifacts["objective"] = json!(objective);
+        record.artifacts["goal"] = goal["result"].clone();
+    }
+    record.artifacts["status"] = json!("running");
+    session::save(&root, &mut record)?;
+
+    let outcome = run_turn(
+        &mut client,
+        &root,
+        &mut record,
+        &thread_id,
+        &task,
+        &thread_model,
+        &effort,
+        permission,
+        args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+    )?;
+    finish_turn(&root, &mut record, &outcome, "exec")
 }
 
 fn resume(args: TaskCommandArgs) -> Result<()> {
@@ -195,274 +177,713 @@ fn resume(args: TaskCommandArgs) -> Result<()> {
         args.stdin.as_deref(),
         Some(&root),
     )?;
+    let task = crate::io::apply_prompt_parts(&task, &args.prompt_append, Some(&root))?;
     let mut record = session::load(&root, RUNTIME, &args.session)?;
     let model = effective_model(args.model.as_deref(), record.model.as_deref());
     let effort = effective_effort(args.effort, record.effort.as_deref());
     let permission = effective_permission(args.permission, record.permission.as_deref());
-    if record.run_id.is_some()
-        && args.permission.is_some()
-        && permission != PermissionMode::from_record(record.permission.as_deref())
-    {
-        bail!(
-            "Codex permission is established when the run starts; start a new session to switch permission"
+    if args.detach {
+        return spawn_detached_worker(
+            "resume",
+            &root,
+            &record.session.clone(),
+            &task,
+            &args,
+            &model,
+            &effort,
+            permission,
         );
     }
-    let prompt_file = write_prompt_file(&root, RUNTIME, &record.session, &task)?;
-    let dispatch_prompt = crate::io::dispatch_task_for_transport(&task, &prompt_file);
-    let dispatch_prompt_file = if let Some(dispatch_prompt) = dispatch_prompt.as_deref() {
-        write_prompt_file(
-            &root,
-            RUNTIME,
-            &format!("{}-dispatch", record.session),
-            dispatch_prompt,
-        )?
-    } else {
-        prompt_file.clone()
-    };
-    let control = record_codex_control(&root, &record)?;
-    let run_id = if let Some(run_id) = &record.run_id {
-        run_id.clone()
-    } else if let Some(thread_id) = &record.thread_id {
-        let resume = codex_resume_command(
-            &args.bins, thread_id, &root, &control, &model, &effort, permission,
-        );
-        let output = run_capture(&resume, Some(&root))?;
-        let raw = parse_json_or_null(&output.stdout);
-        update_record_ids(&mut record, raw.as_ref());
-        require_run_id(&record)?
-    } else {
-        bail!(
-            "codex session {} has neither run_id nor thread_id",
-            record.session
-        );
-    };
-    let command = codex_send_command(
-        &args.bins,
-        &run_id,
-        &dispatch_prompt_file,
-        &control,
-        &args,
-        &model,
-        &effort,
-    );
-    let output = run_capture(&command, Some(&root))?;
-    let raw = parse_json_or_null(&output.stdout);
-    update_record_ids(&mut record, raw.as_ref());
     record.model = Some(model.clone());
     record.effort = Some(effort.clone());
     record.permission = Some(permission.as_value().to_string());
-    record.artifacts["last_prompt_file"] = json!(prompt_file);
-    record.artifacts["last_dispatch_prompt_file"] = json!(dispatch_prompt_file);
-    record.artifacts["last_transport"] = json!(if dispatch_prompt.is_some() {
-        "file_reference"
-    } else {
-        "direct"
+    if !args.expect_artifact.is_empty() {
+        record.artifacts["expected_artifacts"] = json!(args.expect_artifact);
+    }
+    let outcome = resume_turn(&root, &mut record, &args.bins, &task, args.timeout_ms)?;
+    finish_turn(&root, &mut record, &outcome, "resume")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_detached_worker(
+    action: &str,
+    root: &Path,
+    session: &str,
+    task: &str,
+    args: &TaskCommandArgs,
+    model: &str,
+    effort: &str,
+    permission: PermissionMode,
+) -> Result<()> {
+    let task_file = write_prompt_file(root, RUNTIME, &format!("{session}-detach"), task)?;
+    // Pre-write a starting record so `pandacode wait`/status see the lane
+    // immediately, before the background worker has spawned its app-server.
+    let mut pre = SessionRecord::new(RUNTIME, session, "codex-appserver", root);
+    pre.model = Some(model.to_string());
+    pre.effort = Some(effort.to_string());
+    pre.permission = Some(permission.as_value().to_string());
+    pre.artifacts = json!({
+        "status": "starting",
+        "detached": true,
+        "expected_artifacts": args.expect_artifact,
     });
-    let send_report = command_summary(
-        output.ok,
-        "send",
-        Some(&record.session),
-        &command,
-        &output,
-        raw.as_ref(),
-    );
-    let (ok, state, final_summary, execute_report) = if output.ok {
-        if is_needs_input(raw.as_ref()) {
-            set_pending_stage(&mut record, Some("send"));
-            (
-                false,
-                codex_state(raw.as_ref()),
-                codex_output_summary(raw.as_ref()),
-                json!(null),
-            )
-        } else {
-            let execute_command = codex_execute_command(
-                &args.bins,
-                &run_id,
-                &dispatch_prompt_file,
-                &control,
-                &args,
-                &model,
-                &effort,
-            );
-            let execute_output = run_capture(&execute_command, Some(&root))?;
-            let execute_raw = parse_json_or_null(&execute_output.stdout);
-            update_record_ids(&mut record, execute_raw.as_ref());
-            if is_needs_input(execute_raw.as_ref()) {
-                set_pending_stage(&mut record, Some("execute"));
-            } else {
-                set_pending_stage(&mut record, None);
-            }
-            let summary = codex_output_summary(execute_raw.as_ref().or(raw.as_ref()));
-            (
-                execute_output.ok && !is_needs_input(execute_raw.as_ref()),
-                codex_state(execute_raw.as_ref().or(raw.as_ref())),
-                summary,
-                command_summary(
-                    execute_output.ok,
-                    "execute",
-                    Some(&record.session),
-                    &execute_command,
-                    &execute_output,
-                    execute_raw.as_ref(),
-                ),
-            )
-        }
-    } else {
-        (
-            false,
-            codex_state(raw.as_ref()),
-            codex_output_summary(raw.as_ref()),
-            json!(null),
-        )
-    };
-    session::save(&root, &mut record)?;
-    let mut report = json!({
-        "ok": ok,
+    session::save(root, &mut pre)?;
+    let out_dir = pandacode_dir(root).join(RUNTIME).join("detached");
+    std::fs::create_dir_all(&out_dir)?;
+    let result_file = out_dir.join(format!("{session}.json"));
+    let stdout = std::fs::File::create(&result_file)?;
+    let stderr = stdout.try_clone()?;
+    let exe = std::env::current_exe()?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("codex")
+        .arg(action)
+        .args(["--session", session])
+        .args(["--task-file", &task_file.to_string_lossy()])
+        .args(["--cd", &root.to_string_lossy()])
+        .args(["--model", model])
+        .args(["--effort", effort])
+        .args(["--permission", permission.as_value()])
+        .args(["--codex-bin", &args.bins.codex_bin])
+        .args(["--claude-bin", &args.bins.claude_bin])
+        .args(["--tmux-bin", &args.bins.tmux_bin])
+        .args(["--log-mode", &args.bins.log_mode])
+        .arg("--json")
+        .env(crate::io::DETACHED_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(stdout)
+        .stderr(stderr);
+    if let Some(timeout) = args.timeout_ms {
+        command.args(["--timeout-ms", &timeout.to_string()]);
+    }
+    if let Some(objective) = &args.objective {
+        command.args(["--objective", objective]);
+    }
+    for artifact in &args.expect_artifact {
+        command.args(["--expect-artifact", &artifact.to_string_lossy()]);
+    }
+    if let Some(auth_home) = &args.bins.auth_home {
+        command.args(["--auth-home", &auth_home.to_string_lossy()]);
+    }
+    if let Some(codex_home) = &args.bins.codex_home {
+        command.args(["--codex-home", &codex_home.to_string_lossy()]);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let child = command.spawn().context("spawn detached codex worker")?;
+    output_json(&json!({
+        "ok": true,
+        "state": "running",
         "runtime": RUNTIME,
-        "action": "resume",
-        "session": record.session,
-        "state": state,
-        "send": send_report,
-        "execute": execute_report,
-        "summary": final_summary
-    });
-    report["record"] = serde_json::to_value(record)?;
-    output_json(&report)
+        "action": action,
+        "session": session,
+        "detached": true,
+        "worker_pid": child.id(),
+        "result_file": result_file,
+        "note": "turn runs in a detached worker; poll `pandacode codex status`, continue with `answer`, abort with `interrupt`, end with `stop`",
+    }))
 }
 
 fn answer(args: AnswerCommandArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
-    let mut record = session::load(&root, RUNTIME, &args.session)?;
-    let run_id = require_run_id(&record)?;
-    let control = record_codex_control(&root, &record)?;
-    let pending_stage = pending_stage(&record);
-    let command = codex_answer_command(&args.bins, &run_id, &root, &control, &args)?;
-    let output = run_capture(&command, Some(&root))?;
-    let raw = parse_json_or_null(&output.stdout);
-    update_record_ids(&mut record, raw.as_ref());
-    let answer_report = command_summary(
-        output.ok,
-        "answer",
-        Some(&record.session),
-        &command,
-        &output,
-        raw.as_ref(),
-    );
-
-    let mut execute_report = json!(null);
-    let mut final_summary = codex_output_summary(raw.as_ref());
-    let mut ok = output.ok;
-    let mut state = codex_state(raw.as_ref());
-
-    if output.ok && args.wait && is_needs_input(raw.as_ref()) {
-        set_pending_stage(&mut record, pending_stage.as_deref());
-        ok = false;
-    } else if output.ok
-        && args.wait
-        && is_completed(raw.as_ref())
-        && matches!(pending_stage.as_deref(), Some("start" | "send"))
+    let record = session::load(&root, RUNTIME, &args.session)?;
+    let pending = record.artifacts["pending_questions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let live_wait = record.artifacts["status"] == "waiting_for_user"
+        && record.artifacts["answer_file"].is_string()
+        && pid_alive(record.artifacts["runner_pid"].as_u64());
+    if live_wait
+        && let Ok(payload) =
+            build_structured_answer(&pending, args.choice, args.text.as_deref())
     {
-        let model = effective_model(None, record.model.as_deref());
-        let effort = effective_effort(None, record.effort.as_deref());
-        let execute_command = codex_execute_after_answer_command(
-            &args.bins, &run_id, &control, &args, &model, &effort,
-        );
-        let execute_output = run_capture(&execute_command, Some(&root))?;
-        let execute_raw = parse_json_or_null(&execute_output.stdout);
-        update_record_ids(&mut record, execute_raw.as_ref());
-        if is_needs_input(execute_raw.as_ref()) {
-            set_pending_stage(&mut record, Some("execute"));
-        } else {
-            set_pending_stage(&mut record, None);
-        }
-        ok = execute_output.ok && !is_needs_input(execute_raw.as_ref());
-        state = codex_state(execute_raw.as_ref().or(raw.as_ref()));
-        final_summary = codex_output_summary(execute_raw.as_ref().or(raw.as_ref()));
-        execute_report = command_summary(
-            execute_output.ok,
-            "execute",
-            Some(&record.session),
-            &execute_command,
-            &execute_output,
-            execute_raw.as_ref(),
-        );
-    } else if output.ok && !args.wait {
-        state = "running".to_string();
-        set_pending_stage(&mut record, pending_stage.as_deref());
-    } else if output.ok {
-        set_pending_stage(&mut record, None);
+        return structured_answer(&root, record, payload, args.timeout_ms);
     }
+    // Fallback: continue the thread with the answer as a fresh turn.
+    let mut record = record;
+    let answer_text = match (&args.text, args.choice) {
+        (Some(text), None) => text.clone(),
+        (None, Some(choice)) => choice_answer_text(&record, choice)?,
+        _ => {
+            output_json(&json!({
+                "ok": false,
+                "runtime": RUNTIME,
+                "action": "answer",
+                "error": "pass exactly one answer source: --choice N or --text TEXT"
+            }))?;
+            return Ok(());
+        }
+    };
+    let pending_value = record.artifacts["pending_questions"].clone();
+    let task = if pending_value.is_null() {
+        answer_text
+    } else {
+        format!("User answer to the pending question(s) {pending_value}:\n{answer_text}")
+    };
+    record.artifacts["pending_questions"] = Value::Null;
+    let outcome = resume_turn(&root, &mut record, &args.bins, &task, args.timeout_ms)?;
+    finish_turn_with(&root, &mut record, &outcome, "answer", json!("resume_turn"))
+}
 
-    session::save(&root, &mut record)?;
+fn structured_answer(
+    root: &Path,
+    record: SessionRecord,
+    payload: Value,
+    timeout_ms: Option<u64>,
+) -> Result<()> {
+    let answer_file = PathBuf::from(
+        record.artifacts["answer_file"]
+            .as_str()
+            .context("answer_file missing")?,
+    );
+    let original_questions = record.artifacts["pending_questions"].clone();
+    if let Some(parent) = answer_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = answer_file.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_string(&payload)?)?;
+    std::fs::rename(&tmp, &answer_file)?;
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let session_name = record.session.clone();
+    loop {
+        std::thread::sleep(POLL_SLICE);
+        let current = session::load(root, RUNTIME, &session_name)?;
+        let status = current.artifacts["status"].as_str().unwrap_or("");
+        let questions_changed = current.artifacts["pending_questions"] != original_questions;
+        let settled = match status {
+            "running" => false,
+            "waiting_for_user" => questions_changed,
+            _ => true,
+        };
+        if settled || Instant::now() >= deadline {
+            let ok = status == "completed";
+            return output_json(&json!({
+                "ok": ok,
+                "state": current.artifacts["status"],
+                "runtime": RUNTIME,
+                "action": "answer",
+                "answer_mode": "structured",
+                "session": current.session,
+                "summary": {
+                    "last_agent_message": current.artifacts["last_agent_message"],
+                    "model": current.model,
+                    "effort": current.effort,
+                    "usage": current.artifacts["usage"],
+                },
+                "pending_user_input": current.artifacts["pending_questions"],
+                "record": current,
+            }));
+        }
+    }
+}
+
+fn build_structured_answer(
+    questions: &[Value],
+    choice: Option<usize>,
+    text: Option<&str>,
+) -> Result<Value> {
+    if questions.is_empty() {
+        bail!("no pending questions recorded");
+    }
+    let mut answers = serde_json::Map::new();
+    for question in questions {
+        let id = question
+            .get("id")
+            .and_then(Value::as_str)
+            .context("pending question has no id; falling back to a resume turn")?;
+        let value = if let Some(text) = text {
+            text.to_string()
+        } else {
+            let choice = choice.context("pass --choice N or --text TEXT")?;
+            if choice == 0 {
+                bail!("--choice is 1-based");
+            }
+            question
+                .get("options")
+                .and_then(Value::as_array)
+                .and_then(|options| options.get(choice - 1))
+                .and_then(option_label)
+                .with_context(|| format!("choice {choice} is out of range for question {id}"))?
+        };
+        answers.insert(id.to_string(), json!({ "answers": [value] }));
+    }
+    Ok(json!({ "answers": answers }))
+}
+
+fn option_label(option: &Value) -> Option<String> {
+    option
+        .as_str()
+        .map(ToString::to_string)
+        .or_else(|| {
+            option
+                .get("label")
+                .or_else(|| option.get("text"))
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+}
+
+fn resume_turn(
+    root: &Path,
+    record: &mut SessionRecord,
+    bins: &RuntimeBins,
+    task: &str,
+    timeout_ms: Option<u64>,
+) -> Result<TurnOutcome> {
+    let thread_id = record
+        .thread_id
+        .clone()
+        .context("session has no Codex thread id; run `pandacode codex exec` first")?;
+    let model = record
+        .model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let effort = record
+        .effort
+        .clone()
+        .unwrap_or_else(|| DEFAULT_EFFORT.to_string());
+    let permission = PermissionMode::from_record(record.permission.as_deref());
+    let log_path = appserver_log_path(root, &record.session);
+    let prompt_file = write_prompt_file(root, RUNTIME, &record.session, task)?;
+    record.artifacts["last_prompt_file"] = json!(prompt_file);
+    record.artifacts["runner_pid"] = json!(std::process::id());
+    record.artifacts["detached"] = json!(crate::io::detached_worker());
+
+    let mut client =
+        codex_appserver::spawn_initialized(bins, root, Some(log_path.clone()))?;
+    let resumed = client.call(
+        "thread/resume",
+        json!({ "threadId": thread_id, "model": model }),
+        CALL_TIMEOUT,
+    )?;
+    if let Some(path) = resumed
+        .pointer("/result/thread/path")
+        .and_then(Value::as_str)
+    {
+        record.thread_path = Some(path.to_string());
+    }
+    let thread_model = resumed
+        .pointer("/result/model")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .unwrap_or(model);
+    record.artifacts["status"] = json!("running");
+    session::save(root, record)?;
+    run_turn(
+        &mut client,
+        root,
+        record,
+        &thread_id,
+        task,
+        &thread_model,
+        &effort,
+        permission,
+        timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_turn(
+    client: &mut AppServerClient,
+    root: &Path,
+    record: &mut SessionRecord,
+    thread_id: &str,
+    prompt: &str,
+    model: &str,
+    effort: &str,
+    permission: PermissionMode,
+    timeout_ms: u64,
+) -> Result<TurnOutcome> {
+    let request_id = client.send_request(
+        "turn/start",
+        json!({
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt, "text_elements": []}],
+            "approvalPolicy": approval_policy(permission),
+            "collaborationMode": {
+                "mode": "default",
+                "settings": {
+                    "model": model,
+                    "developer_instructions": null,
+                    "reasoning_effort": effort,
+                },
+            },
+        }),
+    )?;
+    let answer_wait = crate::io::detached_worker();
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut outcome = TurnOutcome {
+        state: "running".to_string(),
+        ..TurnOutcome::default()
+    };
+    loop {
+        let message = match client.recv_maybe(POLL_SLICE) {
+            Ok(Some(message)) => message,
+            Ok(None) => {
+                if take_interrupt(root, &record.session) {
+                    interrupt_active_turn(client, record, thread_id);
+                    outcome.state = "interrupted".to_string();
+                    client.kill();
+                    return Ok(outcome);
+                }
+                if Instant::now() >= deadline {
+                    client.kill();
+                    outcome.state = "timeout".to_string();
+                    return Ok(outcome);
+                }
+                continue;
+            }
+            Err(error) => {
+                client.kill();
+                outcome.state = "failed".to_string();
+                outcome.errors.push(json!({ "error": error.to_string() }));
+                return Ok(outcome);
+            }
+        };
+        if message.get("method").is_none() {
+            if message.get("id").and_then(Value::as_u64) == Some(request_id) {
+                if let Some(error) = message.get("error") {
+                    outcome.state = "failed".to_string();
+                    outcome.errors.push(json!({ "error": error }));
+                    return Ok(outcome);
+                }
+                if let Some(turn_id) = message.pointer("/result/turn/id").and_then(Value::as_str) {
+                    record.artifacts["turn_id"] = json!(turn_id);
+                }
+            }
+            continue;
+        }
+        if let Some(id) = server_request_id(&message) {
+            let method = message["method"].as_str().unwrap_or("");
+            if method == "item/tool/requestUserInput" {
+                outcome.questions = message
+                    .pointer("/params/questions")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                if answer_wait {
+                    match wait_for_structured_answer(client, root, record, &outcome.questions, deadline)? {
+                        AnswerWait::Answered(payload) => {
+                            client.send_response(id, payload)?;
+                            record.artifacts["pending_questions"] = Value::Null;
+                            record.artifacts["answer_file"] = Value::Null;
+                            record.artifacts["status"] = json!("running");
+                            session::save(root, record)?;
+                            outcome.questions.clear();
+                            continue;
+                        }
+                        AnswerWait::Interrupted => {
+                            interrupt_active_turn(client, record, thread_id);
+                            outcome.state = "interrupted".to_string();
+                            client.kill();
+                            return Ok(outcome);
+                        }
+                        AnswerWait::TimedOut => {
+                            client.kill();
+                            outcome.state = "timeout".to_string();
+                            return Ok(outcome);
+                        }
+                    }
+                }
+                outcome.state = "waiting_for_user".to_string();
+                client.kill();
+                return Ok(outcome);
+            }
+            let _ = client.send_response(id, json!({}));
+            continue;
+        }
+        match notification_method(&message).unwrap_or("") {
+            "turn/started" => {
+                if let Some(turn_id) = message.pointer("/params/turn/id").and_then(Value::as_str) {
+                    record.artifacts["turn_id"] = json!(turn_id);
+                }
+            }
+            "item/completed" => {
+                let item = &message["params"]["item"];
+                let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+                if matches!(item_type, "agentMessage" | "agent_message")
+                    && let Some(text) = item.get("text").and_then(Value::as_str)
+                {
+                    outcome.agent_messages.push(text.to_string());
+                    record.artifacts["last_agent_message"] = json!(text);
+                    let _ = session::save(root, record);
+                }
+            }
+            "thread/tokenUsage/updated" => {
+                outcome.usage = Some(message["params"].clone());
+                record.artifacts["usage"] = message["params"].clone();
+                let _ = session::save(root, record);
+            }
+            "turn/completed" => {
+                outcome.state = "completed".to_string();
+                outcome.completed = Some(message["params"].clone());
+                return Ok(outcome);
+            }
+            "error" => {
+                outcome.state = "failed".to_string();
+                outcome.errors.push(message.clone());
+                return Ok(outcome);
+            }
+            _ => {}
+        }
+    }
+}
+
+enum AnswerWait {
+    Answered(Value),
+    Interrupted,
+    TimedOut,
+}
+
+fn wait_for_structured_answer(
+    _client: &mut AppServerClient,
+    root: &Path,
+    record: &mut SessionRecord,
+    questions: &[Value],
+    deadline: Instant,
+) -> Result<AnswerWait> {
+    let answer_file = answer_file_path(root, &record.session);
+    if let Some(parent) = answer_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let _ = std::fs::remove_file(&answer_file);
+    record.artifacts["status"] = json!("waiting_for_user");
+    record.artifacts["pending_questions"] = json!(questions);
+    record.artifacts["answer_file"] = json!(answer_file);
+    session::save(root, record)?;
+    loop {
+        if take_interrupt(root, &record.session) {
+            return Ok(AnswerWait::Interrupted);
+        }
+        if Instant::now() >= deadline {
+            return Ok(AnswerWait::TimedOut);
+        }
+        if answer_file.exists() {
+            let text = std::fs::read_to_string(&answer_file)?;
+            let _ = std::fs::remove_file(&answer_file);
+            if let Ok(payload) = serde_json::from_str::<Value>(&text) {
+                return Ok(AnswerWait::Answered(payload));
+            }
+        }
+        std::thread::sleep(POLL_SLICE);
+    }
+}
+
+fn interrupt_active_turn(client: &mut AppServerClient, record: &SessionRecord, thread_id: &str) {
+    if let Some(turn_id) = record.artifacts["turn_id"].as_str() {
+        let _ = client.call(
+            "turn/interrupt",
+            json!({ "threadId": thread_id, "turnId": turn_id }),
+            Duration::from_secs(10),
+        );
+    }
+}
+
+fn finish_turn(
+    root: &Path,
+    record: &mut SessionRecord,
+    outcome: &TurnOutcome,
+    action: &str,
+) -> Result<()> {
+    finish_turn_with(root, record, outcome, action, Value::Null)
+}
+
+fn finish_turn_with(
+    root: &Path,
+    record: &mut SessionRecord,
+    outcome: &TurnOutcome,
+    action: &str,
+    answer_mode: Value,
+) -> Result<()> {
+    let last_agent_message = outcome
+        .agent_messages
+        .last()
+        .cloned()
+        .or_else(|| record.artifacts["last_agent_message"].as_str().map(ToString::to_string));
+    let missing = crate::io::missing_artifacts(root, &record.artifacts["expected_artifacts"]);
+    let state = if outcome.state == "completed" && !missing.is_empty() {
+        "no_report".to_string()
+    } else {
+        outcome.state.clone()
+    };
+    record.artifacts["missing_artifacts"] = json!(missing);
+    record.artifacts["status"] = json!(state);
+    record.artifacts["last_agent_message"] = json!(last_agent_message);
+    if let Some(usage) = &outcome.usage {
+        record.artifacts["usage"] = usage.clone();
+    }
+    record.artifacts["pending_questions"] = if outcome.state == "waiting_for_user" {
+        json!(outcome.questions)
+    } else {
+        Value::Null
+    };
+    record.artifacts["answer_file"] = Value::Null;
+    let _ = std::fs::remove_file(answer_file_path(root, &record.session));
+    let _ = std::fs::remove_file(interrupt_file_path(root, &record.session));
+    session::save(root, record)?;
+    let ok = state == "completed";
+    let pending_user_input = if state == "waiting_for_user" {
+        json!({ "questions": outcome.questions, "source": "requestUserInput" })
+    } else {
+        Value::Null
+    };
     let mut report = json!({
         "ok": ok,
-        "runtime": RUNTIME,
-        "action": "answer",
-        "session": record.session,
         "state": state,
-        "answer": answer_report,
-        "execute": execute_report,
-        "summary": final_summary
+        "runtime": RUNTIME,
+        "action": action,
+        "session": record.session,
+        "summary": {
+            "last_agent_message": last_agent_message,
+            "agent_messages": outcome.agent_messages,
+            "model": record.model,
+            "effort": record.effort,
+            "usage": outcome.usage,
+            "completed": outcome.completed,
+            "errors": outcome.errors,
+        },
+        "pending_user_input": pending_user_input,
+        "artifacts": record.artifacts,
+        "record": record,
     });
-    report["record"] = serde_json::to_value(record)?;
+    if !answer_mode.is_null() {
+        report["answer_mode"] = answer_mode;
+    }
     output_json(&report)
+}
+
+fn choice_answer_text(record: &SessionRecord, choice: usize) -> Result<String> {
+    if choice == 0 {
+        bail!("--choice is 1-based");
+    }
+    let questions = record.artifacts["pending_questions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    for question in &questions {
+        if let Some(options) = question.get("options").and_then(Value::as_array)
+            && let Some(option) = options.get(choice - 1)
+            && let Some(text) = option_label(option)
+        {
+            return Ok(text);
+        }
+    }
+    Ok(format!("Option {choice}"))
 }
 
 fn status(args: SessionCommandArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
     let record = session::load(&root, RUNTIME, &args.session)?;
-    let run_id = require_run_id(&record)?;
-    let control = record_codex_control(&root, &record)?;
-    let command = codex_read_command(&args.bins, &run_id, &control, false);
-    let output = run_capture(&command, Some(&root))?;
-    let raw = parse_json_or_null(&output.stdout);
+    let state = record.artifacts["status"].as_str().unwrap_or("unknown");
     output_json(&json!({
-        "ok": output.ok,
+        "ok": state == "completed" || state == "idle",
+        "state": state,
         "runtime": RUNTIME,
         "action": "status",
         "session": record.session,
-        "state": codex_state(raw.as_ref()),
-        "summary": codex_output_summary(raw.as_ref()),
-        "output_tail": structured_log_tail(&output.stdout, 80),
-        "command": command_summary(output.ok, "status", Some(&record.session), &command, &output, raw.as_ref()),
-        "record": record
+        "summary": {
+            "last_agent_message": record.artifacts["last_agent_message"],
+            "model": record.model,
+            "effort": record.effort,
+            "usage": record.artifacts["usage"],
+        },
+        "pending_user_input": record.artifacts["pending_questions"],
+        "artifacts": record.artifacts,
+        "record": record,
     }))
 }
 
 fn logs(args: LogsCommandArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
     let record = session::load(&root, RUNTIME, &args.session)?;
-    let run_id = require_run_id(&record)?;
-    let control = record_codex_control(&root, &record)?;
-    let command = codex_read_command(&args.bins, &run_id, &control, true);
-    let output = run_capture(&command, Some(&root))?;
-    if args.json {
-        let raw = parse_json_or_null(&output.stdout);
-        output_json(&json!({
-            "ok": output.ok,
+    if args.visible {
+        let thread_id = record
+            .thread_id
+            .clone()
+            .context("session has no Codex thread id yet")?;
+        let mut client = codex_appserver::spawn_initialized(&args.bins, &root, None)?;
+        let response = client.call(
+            "thread/read",
+            json!({ "threadId": thread_id, "includeTurns": true }),
+            CALL_TIMEOUT,
+        )?;
+        client.kill();
+        let thread = &response["result"]["thread"];
+        let mut messages = Vec::new();
+        for turn in thread
+            .get("turns")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let turn_id = turn.get("id").and_then(Value::as_str).unwrap_or("");
+            for item in turn
+                .get("items")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+                let text = match item_type {
+                    "userMessage" => item
+                        .pointer("/content/0/text")
+                        .and_then(Value::as_str),
+                    "agentMessage" => item.get("text").and_then(Value::as_str),
+                    _ => None,
+                };
+                if let Some(text) = text {
+                    messages.push(json!({
+                        "turn_id": turn_id,
+                        "type": item_type,
+                        "text": text,
+                    }));
+                }
+            }
+        }
+        return output_json(&json!({
+            "ok": true,
             "runtime": RUNTIME,
             "action": "logs",
             "session": record.session,
-            "tail": args.tail,
-            "state": codex_state(raw.as_ref()),
-            "summary": codex_output_summary(raw.as_ref()),
-            "output_tail": structured_log_tail(&output.stdout, args.tail),
-            "command": command_summary(output.ok, "logs", Some(&record.session), &command, &output, raw.as_ref()),
-            "record": record
+            "view": "thread",
+            "thread_id": thread.get("id"),
+            "turn_count": thread.get("turns").and_then(Value::as_array).map(Vec::len),
+            "messages": messages,
+        }));
+    }
+    let log_path = appserver_log_path(&root, &record.session);
+    let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(args.tail);
+    let log_tail = lines[start..].join("\n");
+    if args.json {
+        output_json(&json!({
+            "ok": true,
+            "runtime": RUNTIME,
+            "action": "logs",
+            "session": record.session,
+            "state": record.artifacts["status"],
+            "log_path": log_path,
+            "log_tail": log_tail,
+            "summary": {
+                "last_agent_message": record.artifacts["last_agent_message"],
+            },
         }))
     } else {
-        println!("{}", tail(&output.stdout, args.tail));
-        if !output.stderr.trim().is_empty() {
-            eprintln!("{}", tail(&output.stderr, args.tail));
-        }
+        println!("{log_tail}");
         Ok(())
     }
 }
 
 fn artifacts(args: SessionCommandArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
-    output_json(&session::artifacts(&root, RUNTIME, &args.session)?)
+    let session_name = session::resolve_session(&root, RUNTIME, &args.session)?;
+    output_json(&session::artifacts(&root, RUNTIME, &session_name)?)
 }
 
 fn model(args: ModelCommandArgs) -> Result<()> {
@@ -475,8 +896,85 @@ fn model(args: ModelCommandArgs) -> Result<()> {
         "ok": true,
         "runtime": RUNTIME,
         "action": "model",
-        "note": "model and effort are applied on the next codex resume/send turn",
+        "note": "model and effort apply on the next exec/resume/answer turn",
         "record": record
+    }))
+}
+
+fn interrupt(args: SessionCommandArgs) -> Result<()> {
+    let root = workspace(&args.cd)?;
+    let record = session::load(&root, RUNTIME, &args.session)?;
+    let state = record.artifacts["status"].as_str().unwrap_or("unknown");
+    let live = matches!(state, "running" | "waiting_for_user" | "starting")
+        && pid_alive(record.artifacts["runner_pid"].as_u64());
+    if !live {
+        return output_json(&json!({
+            "ok": true,
+            "runtime": RUNTIME,
+            "action": "interrupt",
+            "session": record.session,
+            "state": state,
+            "note": "no live turn to interrupt",
+        }));
+    }
+    let interrupt_file = interrupt_file_path(&root, &record.session);
+    if let Some(parent) = interrupt_file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&interrupt_file, b"")?;
+    let session_name = record.session.clone();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        std::thread::sleep(POLL_SLICE);
+        let current = session::load(&root, RUNTIME, &session_name)?;
+        let state = current.artifacts["status"].as_str().unwrap_or("unknown");
+        if !matches!(state, "running" | "waiting_for_user" | "starting")
+            || Instant::now() >= deadline
+        {
+            return output_json(&json!({
+                "ok": state == "interrupted",
+                "runtime": RUNTIME,
+                "action": "interrupt",
+                "session": current.session,
+                "state": state,
+            }));
+        }
+    }
+}
+
+fn stop(args: SessionCommandArgs) -> Result<()> {
+    let root = workspace(&args.cd)?;
+    let mut record = session::load(&root, RUNTIME, &args.session)?;
+    let runner_pid = record.artifacts["runner_pid"].as_u64();
+    let detached = record.artifacts["detached"] == json!(true);
+    if detached
+        && let Some(pid) = runner_pid
+        && pid_alive(Some(pid))
+    {
+        kill_process_group(pid as u32);
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    codex_appserver::reap_orphans(&root);
+    record.artifacts["status"] = json!("stopped");
+    record.artifacts["pending_questions"] = Value::Null;
+    session::save(&root, &mut record)?;
+    output_json(&json!({
+        "ok": true,
+        "runtime": RUNTIME,
+        "action": "stop",
+        "session": record.session,
+        "state": "stopped",
+        "note": "thread state stays resumable on disk",
+    }))
+}
+
+fn list(args: RuntimeGlobalArgs) -> Result<()> {
+    let root = workspace(&args.cd)?;
+    output_json(&json!({
+        "ok": true,
+        "runtime": RUNTIME,
+        "action": "list",
+        "sessions": session::list(&root, RUNTIME)?,
     }))
 }
 
@@ -485,71 +983,72 @@ fn models(args: RuntimeGlobalArgs) -> Result<()> {
     output_json(&models_report(&root, &args.bins)?)
 }
 
-fn interrupt(args: SessionCommandArgs) -> Result<()> {
-    session_action(args, "interrupt", codex_interrupt_command)
-}
-
-fn stop(args: SessionCommandArgs) -> Result<()> {
-    session_action(args, "stop", codex_stop_command)
-}
-
-fn list(args: RuntimeGlobalArgs) -> Result<()> {
-    let root = workspace(&args.cd)?;
-    let command = vec![
-        args.bins.codexctl_bin.clone(),
-        "session".to_string(),
-        "list".to_string(),
-        "--threads".to_string(),
-        "--log-dir".to_string(),
-        codex_legacy_log_dir(&root).to_string_lossy().to_string(),
-        "--log-mode".to_string(),
-        args.bins.log_mode.clone(),
-    ];
-    let output = run_capture(&command, Some(&root))?;
-    output_json(&json!({
-        "ok": output.ok,
-        "runtime": RUNTIME,
-        "local": session::list(&root, RUNTIME)?,
-        "codexctl": command_report(output.ok, RUNTIME, "list", None, &command, &output, parse_json_or_null(&output.stdout))
-    }))
-}
+// Codex app-server protocol surface PandaCode depends on. Surfaced in doctor
+// so a codex CLI upgrade that changes the protocol is visible, not silent.
+const TESTED_CODEX_VERSION: &str = "0.139.0";
 
 fn doctor(args: RuntimeGlobalArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
-    output_json(&doctor_report(&root, &args.bins)?)
+    let mut report = doctor_report(&root, &args.bins)?;
+    let version = super::version_report(&args.bins.codex_bin, &["--version"]);
+    let installed = version
+        .get("stdout")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string());
+    report["codex_version"] = json!({
+        "installed": installed,
+        "tested": TESTED_CODEX_VERSION,
+        "note": "PandaCode drives the codex app-server JSON-RPC protocol; if a future codex CLI changes thread/turn methods or event names, turns may stall — re-verify after upgrades.",
+    });
+    report["appserver"] = appserver_handshake_report(&root, &args.bins);
+    output_json(&report)
 }
 
-pub fn doctor_report(root: &Path, bins: &RuntimeBins) -> Result<serde_json::Value> {
-    let codexctl = super::version_report(&bins.codexctl_bin, &["--help"]);
+fn appserver_handshake_report(root: &Path, bins: &RuntimeBins) -> Value {
+    match codex_appserver::spawn_initialized(bins, root, None) {
+        Ok(mut client) => {
+            let account = client
+                .call("account/read", json!({}), CALL_TIMEOUT)
+                .ok()
+                .and_then(|response| response.pointer("/result/account").cloned())
+                .unwrap_or(Value::Null);
+            let rate_limits = client
+                .call("account/rateLimits/read", json!({}), CALL_TIMEOUT)
+                .ok()
+                .and_then(|response| response.pointer("/result/rateLimits").cloned())
+                .unwrap_or(Value::Null);
+            client.kill();
+            json!({ "ok": true, "account": account, "rate_limits": rate_limits })
+        }
+        Err(error) => json!({ "ok": false, "error": error.to_string() }),
+    }
+}
+
+pub fn doctor_report(root: &Path, bins: &RuntimeBins) -> Result<Value> {
     let codex = super::version_report(&bins.codex_bin, &["--help"]);
-    let codexctl_ok = codexctl
-        .get("ok")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let codex_ok = codex.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    let missing = [
-        (!codexctl_ok).then_some("codexctl"),
-        (!codex_ok).then_some("codex"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
+    let codex_ok = codex.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let missing = [(!codex_ok).then_some("codex")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     Ok(json!({
-        "ok": codexctl_ok && codex_ok,
-        "state": if codexctl_ok && codex_ok { "available" } else { "missing_requirements" },
+        "ok": codex_ok,
+        "state": if codex_ok { "available" } else { "missing_requirements" },
         "runtime": RUNTIME,
         "workspace": root,
-        "driver": "codexctl session",
-        "requirements": ["codexctl", "codex"],
+        "driver": "codex app-server",
+        "requirements": ["codex"],
         "missing": missing,
         "capabilities": {
             "task_execution": true,
             "resume": true,
             "answer": true,
+            "detach": true,
             "interrupt": true,
             "stop": true,
             "model": true,
             "effort": true,
+            "objective": true,
             "permissions_supported": ["max", "limited"],
             "timeout": true,
             "token_budget": false,
@@ -558,24 +1057,19 @@ pub fn doctor_report(root: &Path, bins: &RuntimeBins) -> Result<serde_json::Valu
             "auto_compact": false,
             "verify_commands": false
         },
-        "codexctl": codexctl,
-        "codex": codex
+        "codex": codex,
     }))
 }
 
-pub fn models_report(root: &Path, bins: &RuntimeBins) -> Result<serde_json::Value> {
-    let command = vec![bins.codexctl_bin.clone(), "models".to_string()];
-    let output = run_capture(&command, Some(root))?;
-    let mut report = command_report(
-        output.ok,
-        RUNTIME,
-        "models",
-        None,
-        &command,
-        &output,
-        parse_json_or_null(&output.stdout),
-    );
-    report["capabilities"] = json!({
+pub fn models_report(root: &Path, bins: &RuntimeBins) -> Result<Value> {
+    let builtin_prompts = BUILTIN_PROMPTS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    let fallback_models = json!([
+        {"id": DEFAULT_MODEL, "supported_reasoning_efforts": ["low", "medium", "high", "xhigh"], "is_default": true}
+    ]);
+    let capabilities = json!({
         "model": true,
         "effort": true,
         "permissions_supported": ["max", "limited"],
@@ -586,462 +1080,122 @@ pub fn models_report(root: &Path, bins: &RuntimeBins) -> Result<serde_json::Valu
         "auto_compact": false,
         "verify_commands": false
     });
-    Ok(report)
-}
-
-fn session_action(
-    args: SessionCommandArgs,
-    action: &str,
-    build: fn(&RuntimeBins, &str, &CodexControl) -> Vec<String>,
-) -> Result<()> {
-    let root = workspace(&args.cd)?;
-    let record = session::load(&root, RUNTIME, &args.session)?;
-    let run_id = require_run_id(&record)?;
-    let control = record_codex_control(&root, &record)?;
-    let command = build(&args.bins, &run_id, &control);
-    let output = run_capture(&command, Some(&root))?;
-    output_json(&command_report(
-        output.ok,
-        RUNTIME,
-        action,
-        Some(&record.session),
-        &command,
-        &output,
-        parse_json_or_null(&output.stdout),
-    ))
-}
-
-fn run_codex_start_with_retry(
-    root: &Path,
-    session_name: &str,
-    args: &TaskCommandArgs,
-    prompt_file: &Path,
-    model: &str,
-    effort: &str,
-) -> Result<(CodexControl, Vec<String>, crate::io::CmdOutput, usize)> {
-    let mut retries = 0;
-    loop {
-        let control_session = if retries == 0 {
-            session_name.to_string()
-        } else {
-            format!("{session_name}-retry-{retries}")
-        };
-        let control = new_codex_control(root, &control_session)?;
-        let command =
-            codex_start_command(&args.bins, prompt_file, root, &control, args, model, effort);
-        let output = run_capture(&command, Some(root))?;
-        if output.ok || retries >= 2 || !is_codex_transport_error(&output) {
-            return Ok((control, command, output, retries));
+    let mut client = match codex_appserver::spawn_initialized(bins, root, None) {
+        Ok(client) => client,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "runtime": RUNTIME,
+                "action": "models",
+                "driver": "codex app-server",
+                "workspace": root,
+                "models": fallback_models,
+                "builtin_prompts": builtin_prompts,
+                "error": error.to_string(),
+                "note": "app-server handshake failed; reporting PandaCode Codex defaults",
+                "capabilities": capabilities,
+            }));
         }
-        retries += 1;
-    }
-}
-
-fn is_codex_transport_error(output: &crate::io::CmdOutput) -> bool {
-    let text = format!("{}\n{}", output.stderr, output.stdout).to_lowercase();
-    [
-        "broken pipe",
-        "socket is not connected",
-        "connection reset",
-        "daemon returned invalid json",
-        "eof while parsing",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
-}
-
-fn command_summary(
-    ok: bool,
-    action: &str,
-    session: Option<&str>,
-    command: &[String],
-    output: &crate::io::CmdOutput,
-    raw: Option<&serde_json::Value>,
-) -> serde_json::Value {
-    json!({
-        "ok": ok,
+    };
+    let response = client.call("model/list", json!({}), CALL_TIMEOUT);
+    client.kill();
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            return Ok(json!({
+                "ok": false,
+                "runtime": RUNTIME,
+                "action": "models",
+                "driver": "codex app-server",
+                "workspace": root,
+                "models": fallback_models,
+                "builtin_prompts": builtin_prompts,
+                "error": error.to_string(),
+                "note": "model/list failed; reporting PandaCode Codex defaults",
+                "capabilities": capabilities,
+            }));
+        }
+    };
+    let models = response
+        .pointer("/result/data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|model| {
+            json!({
+                "id": model.get("id").cloned().unwrap_or(Value::Null),
+                "model": model.get("model").cloned().unwrap_or(Value::Null),
+                "display_name": model.get("displayName").cloned().unwrap_or(Value::Null),
+                "is_default": model.get("isDefault").cloned().unwrap_or(Value::Bool(false)),
+                "default_reasoning_effort": model.get("defaultReasoningEffort").cloned().unwrap_or(Value::Null),
+                "supported_reasoning_efforts": model.get("supportedReasoningEfforts").cloned().unwrap_or(Value::Array(Vec::new())),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "ok": true,
         "runtime": RUNTIME,
-        "action": action,
-        "session": session,
-        "command": command,
-        "shell": crate::io::shell_join(command),
-        "exit_code": output.exit_code,
-        "stdout_tail": tail_chars(&output.stdout, 1_200),
-        "stderr_tail": tail_chars(&output.stderr, 1_200),
-        "summary": codex_output_summary(raw)
-    })
+        "action": "models",
+        "driver": "codex app-server",
+        "workspace": root,
+        "models": models,
+        "builtin_prompts": builtin_prompts,
+        "capabilities": capabilities,
+    }))
 }
 
-fn codex_output_summary(raw: Option<&serde_json::Value>) -> serde_json::Value {
-    let Some(raw) = raw else {
-        return json!(null);
+fn appserver_log_path(root: &Path, session: &str) -> PathBuf {
+    pandacode_dir(root)
+        .join(RUNTIME)
+        .join("logs")
+        .join(format!("{session}.jsonl"))
+}
+
+fn control_dir(root: &Path) -> PathBuf {
+    pandacode_dir(root).join(RUNTIME).join("control")
+}
+
+fn answer_file_path(root: &Path, session: &str) -> PathBuf {
+    control_dir(root).join(format!("{session}.answer.json"))
+}
+
+fn interrupt_file_path(root: &Path, session: &str) -> PathBuf {
+    control_dir(root).join(format!("{session}.interrupt"))
+}
+
+fn take_interrupt(root: &Path, session: &str) -> bool {
+    let path = interrupt_file_path(root, session);
+    if path.exists() {
+        let _ = std::fs::remove_file(&path);
+        true
+    } else {
+        false
+    }
+}
+
+fn pid_alive(pid: Option<u64>) -> bool {
+    let Some(pid) = pid else {
+        return false;
     };
-    json!({
-        "ok": raw.get("ok").and_then(|value| value.as_bool()),
-        "status": raw.get("status").and_then(|value| value.as_str()),
-        "current_phase": raw.get("current_phase").and_then(|value| value.as_str()),
-        "run_id": string_field(raw, &["run_id", "runId"]),
-        "thread_id": string_field(raw, &["thread_id", "threadId"]),
-        "thread_path": string_field(raw, &["thread_path", "threadPath"]),
-        "turn_id": string_field(raw, &["turn_id", "turnId"]),
-        "log_path": raw.get("log_path").and_then(|value| value.as_str()),
-        "last_agent_message": raw.get("last_agent_message").and_then(|value| value.as_str())
-            .or_else(|| last_string(raw.get("agent_messages"))),
-        "counts": raw.get("counts").cloned().unwrap_or_else(|| json!({
-            "agent_messages": array_len(raw.get("agent_messages")),
-            "plans": array_len(raw.get("plans")),
-            "questions": array_len(raw.get("questions")),
-            "errors": array_len(raw.get("errors")),
-            "warnings": array_len(raw.get("warnings"))
-        })),
-        "usage": raw.get("usage").cloned(),
-        "errors": raw.get("errors").and_then(|value| value.as_array()).map(|items| items.len()),
-        "warnings": raw.get("warnings").and_then(|value| value.as_array()).map(|items| items.len())
-    })
+    std::process::Command::new("/bin/kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
-fn codex_state(raw: Option<&Value>) -> String {
-    match codex_status(raw) {
-        Some("needs_input") => "waiting_for_user".to_string(),
-        Some("completed") => "completed".to_string(),
-        Some("running") => "running".to_string(),
-        Some("stopped") => "stopped".to_string(),
-        Some("failed") => "failed".to_string(),
-        Some(status) => status.to_string(),
-        None => "unknown".to_string(),
+fn approval_policy(_permission: PermissionMode) -> &'static str {
+    "never"
+}
+
+fn sandbox_policy(permission: PermissionMode) -> &'static str {
+    match permission {
+        PermissionMode::Max => "danger-full-access",
+        PermissionMode::Limited => "workspace-write",
     }
-}
-
-fn codex_status(raw: Option<&Value>) -> Option<&str> {
-    raw.and_then(|value| value.get("status"))
-        .and_then(|value| value.as_str())
-}
-
-fn is_needs_input(raw: Option<&Value>) -> bool {
-    codex_status(raw) == Some("needs_input")
-}
-
-fn is_completed(raw: Option<&Value>) -> bool {
-    codex_status(raw) == Some("completed")
-}
-
-fn update_record_ids(record: &mut SessionRecord, raw: Option<&Value>) {
-    let Some(raw) = raw else {
-        return;
-    };
-    if let Some(run_id) = string_field(raw, &["run_id", "runId"]) {
-        record.run_id = Some(run_id.to_string());
-    }
-    if let Some(thread_id) = string_field(raw, &["thread_id", "threadId"]) {
-        record.thread_id = Some(thread_id.to_string());
-    }
-    if let Some(thread_path) = string_field(raw, &["thread_path", "threadPath"]) {
-        record.thread_path = Some(thread_path.to_string());
-    }
-}
-
-fn pending_stage(record: &SessionRecord) -> Option<String> {
-    record
-        .artifacts
-        .get("pending_stage")
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
-}
-
-fn set_pending_stage(record: &mut SessionRecord, stage: Option<&str>) {
-    if !record.artifacts.is_object() {
-        record.artifacts = json!({});
-    }
-    if let Some(object) = record.artifacts.as_object_mut() {
-        if let Some(stage) = stage {
-            object.insert("pending_stage".to_string(), json!(stage));
-        } else {
-            object.remove("pending_stage");
-        }
-    }
-}
-
-fn first_pending_question_id(
-    bins: &RuntimeBins,
-    run_id: &str,
-    root: &Path,
-    control: &CodexControl,
-) -> Result<String> {
-    let command = codex_read_command(bins, run_id, control, false);
-    let output = run_capture(&command, Some(root))?;
-    if !output.ok {
-        bail!(
-            "codexctl session read failed before answering: {}",
-            output.stderr.trim()
-        );
-    }
-    let raw = parse_json_or_null(&output.stdout);
-    first_question_id(raw.as_ref()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "cannot infer Codex question id for --text; pass --choice N or --text '{{...}}'"
-        )
-    })
-}
-
-fn first_question_id(raw: Option<&Value>) -> Option<String> {
-    let question = raw?
-        .get("questions")
-        .and_then(|value| value.as_array())
-        .and_then(|questions| questions.first())?;
-    for key in ["id", "question_id", "questionId", "key", "name"] {
-        if let Some(value) = question.get(key).and_then(|value| value.as_str()) {
-            return Some(value.to_string());
-        }
-    }
-    question
-        .get("question")
-        .and_then(|value| value.as_str())
-        .map(ToString::to_string)
-}
-
-fn string_field<'a>(value: &'a serde_json::Value, names: &[&str]) -> Option<&'a str> {
-    names
-        .iter()
-        .find_map(|name| value.get(*name).and_then(|field| field.as_str()))
-}
-
-fn last_string(value: Option<&serde_json::Value>) -> Option<&str> {
-    value
-        .and_then(|value| value.as_array())
-        .and_then(|items| items.last())
-        .and_then(|value| value.as_str())
-}
-
-fn array_len(value: Option<&serde_json::Value>) -> usize {
-    value
-        .and_then(|value| value.as_array())
-        .map(|items| items.len())
-        .unwrap_or(0)
-}
-
-fn tail_chars(text: &str, max_chars: usize) -> String {
-    let char_count = text.chars().count();
-    if char_count <= max_chars {
-        return text.to_string();
-    }
-    let start = char_count.saturating_sub(max_chars);
-    format!("...{}", text.chars().skip(start).collect::<String>())
-}
-
-fn codex_start_command(
-    bins: &RuntimeBins,
-    prompt_file: &Path,
-    root: &Path,
-    control: &CodexControl,
-    args: &TaskCommandArgs,
-    model: &str,
-    effort: &str,
-) -> Vec<String> {
-    let mut command = vec![
-        bins.codexctl_bin.clone(),
-        "session".to_string(),
-        "start".to_string(),
-        "--prompt-file".to_string(),
-        prompt_file.to_string_lossy().to_string(),
-        "--cwd".to_string(),
-        root.to_string_lossy().to_string(),
-        "--timeout".to_string(),
-        timeout_arg(args.timeout_ms),
-    ];
-    push_control(&mut command, control, &bins.log_mode);
-    push_model_effort(&mut command, model, effort);
-    push_permission(&mut command, effective_permission(args.permission, None));
-    command
-}
-
-fn codex_send_command(
-    bins: &RuntimeBins,
-    run_id: &str,
-    prompt_file: &Path,
-    control: &CodexControl,
-    args: &TaskCommandArgs,
-    model: &str,
-    effort: &str,
-) -> Vec<String> {
-    let mut command = vec![
-        bins.codexctl_bin.clone(),
-        "session".to_string(),
-        "send".to_string(),
-        "--run-id".to_string(),
-        run_id.to_string(),
-        "--prompt-file".to_string(),
-        prompt_file.to_string_lossy().to_string(),
-        "--timeout".to_string(),
-        timeout_arg(args.timeout_ms),
-    ];
-    push_control(&mut command, control, &args.bins.log_mode);
-    push_model_effort(&mut command, model, effort);
-    command
-}
-
-fn codex_execute_command(
-    bins: &RuntimeBins,
-    run_id: &str,
-    prompt_file: &Path,
-    control: &CodexControl,
-    args: &TaskCommandArgs,
-    model: &str,
-    effort: &str,
-) -> Vec<String> {
-    let mut command = vec![
-        bins.codexctl_bin.clone(),
-        "session".to_string(),
-        "execute".to_string(),
-        "--run-id".to_string(),
-        run_id.to_string(),
-        "--prompt-file".to_string(),
-        prompt_file.to_string_lossy().to_string(),
-        "--timeout".to_string(),
-        timeout_arg(args.timeout_ms),
-    ];
-    push_control(&mut command, control, &args.bins.log_mode);
-    push_model_effort(&mut command, model, effort);
-    command
-}
-
-fn codex_resume_command(
-    bins: &RuntimeBins,
-    thread_id: &str,
-    root: &Path,
-    control: &CodexControl,
-    model: &str,
-    effort: &str,
-    permission: PermissionMode,
-) -> Vec<String> {
-    let mut command = vec![
-        bins.codexctl_bin.clone(),
-        "session".to_string(),
-        "resume".to_string(),
-        "--thread-id".to_string(),
-        thread_id.to_string(),
-        "--cwd".to_string(),
-        root.to_string_lossy().to_string(),
-    ];
-    push_control(&mut command, control, &bins.log_mode);
-    push_model_effort(&mut command, model, effort);
-    push_permission(&mut command, permission);
-    command
-}
-
-fn codex_read_command(
-    bins: &RuntimeBins,
-    run_id: &str,
-    control: &CodexControl,
-    full: bool,
-) -> Vec<String> {
-    let mut command = vec![
-        bins.codexctl_bin.clone(),
-        "session".to_string(),
-        "read".to_string(),
-        "--run-id".to_string(),
-        run_id.to_string(),
-    ];
-    push_control(&mut command, control, &bins.log_mode);
-    if full {
-        command.push("--full".to_string());
-    }
-    command
-}
-
-fn codex_answer_command(
-    bins: &RuntimeBins,
-    run_id: &str,
-    root: &Path,
-    control: &CodexControl,
-    args: &AnswerCommandArgs,
-) -> Result<Vec<String>> {
-    let mut command = vec![
-        bins.codexctl_bin.clone(),
-        "session".to_string(),
-        "answer".to_string(),
-        "--run-id".to_string(),
-        run_id.to_string(),
-        "--timeout".to_string(),
-        timeout_arg(args.timeout_ms),
-    ];
-    push_control(&mut command, control, &bins.log_mode);
-    match (args.choice, args.text.as_deref()) {
-        (Some(choice), None) if choice > 0 => {
-            command.extend(["--pick".to_string(), choice.to_string()]);
-        }
-        (None, Some(text)) => {
-            if serde_json::from_str::<Value>(text)
-                .map(|value| value.is_object())
-                .unwrap_or(false)
-            {
-                command.extend(["--answers-json".to_string(), text.to_string()]);
-            } else {
-                let question_id = first_pending_question_id(bins, run_id, root, control)?;
-                command.extend(["--answer".to_string(), format!("{question_id}={text}")]);
-            }
-        }
-        _ => bail!("pass exactly one answer source: --choice N or --text TEXT"),
-    }
-    if !args.wait {
-        command.push("--detach".to_string());
-    }
-    Ok(command)
-}
-
-fn codex_execute_after_answer_command(
-    bins: &RuntimeBins,
-    run_id: &str,
-    control: &CodexControl,
-    args: &AnswerCommandArgs,
-    model: &str,
-    effort: &str,
-) -> Vec<String> {
-    let mut command = vec![
-        bins.codexctl_bin.clone(),
-        "session".to_string(),
-        "execute".to_string(),
-        "--run-id".to_string(),
-        run_id.to_string(),
-        "--timeout".to_string(),
-        timeout_arg(args.timeout_ms),
-    ];
-    push_control(&mut command, control, &bins.log_mode);
-    push_model_effort(&mut command, model, effort);
-    command
-}
-
-fn codex_interrupt_command(
-    bins: &RuntimeBins,
-    run_id: &str,
-    control: &CodexControl,
-) -> Vec<String> {
-    codex_run_id_command(bins, "interrupt", run_id, control)
-}
-
-fn codex_stop_command(bins: &RuntimeBins, run_id: &str, control: &CodexControl) -> Vec<String> {
-    codex_run_id_command(bins, "stop", run_id, control)
-}
-
-fn codex_run_id_command(
-    bins: &RuntimeBins,
-    action: &str,
-    run_id: &str,
-    control: &CodexControl,
-) -> Vec<String> {
-    let mut command = vec![
-        bins.codexctl_bin.clone(),
-        "session".to_string(),
-        action.to_string(),
-        "--run-id".to_string(),
-        run_id.to_string(),
-    ];
-    push_control(&mut command, control, &bins.log_mode);
-    command
-}
-
-fn push_model_effort(command: &mut Vec<String>, model: &str, effort: &str) {
-    command.extend(["--model".to_string(), model.to_string()]);
-    command.extend(["--effort".to_string(), effort.to_string()]);
 }
 
 fn effective_model(explicit: Option<&str>, stored: Option<&str>) -> String {
@@ -1060,224 +1214,56 @@ fn effective_permission(explicit: Option<PermissionMode>, stored: Option<&str>) 
     explicit.unwrap_or_else(|| PermissionMode::from_record(stored))
 }
 
-fn push_permission(command: &mut Vec<String>, permission: PermissionMode) {
-    match permission {
-        PermissionMode::Max => command.push("--dangerously-full-access".to_string()),
-        PermissionMode::Limited => command.extend([
-            "--sandbox".to_string(),
-            "workspace-write".to_string(),
-            "--approval-policy".to_string(),
-            "never".to_string(),
-        ]),
-    }
-}
-
-fn timeout_arg(timeout_ms: Option<u64>) -> String {
-    timeout_ms
-        .map(|value| value.div_ceil(1000).to_string())
-        .unwrap_or_else(|| "unlimited".to_string())
-}
-
-fn push_control(command: &mut Vec<String>, control: &CodexControl, log_mode: &str) {
-    command.extend([
-        "--log-dir".to_string(),
-        control.log_dir.to_string_lossy().to_string(),
-    ]);
-    command.extend(["--log-mode".to_string(), log_mode.to_string()]);
-    command.extend([
-        "--session-socket".to_string(),
-        control.session_socket.to_string_lossy().to_string(),
-    ]);
-}
-
-fn new_codex_control(root: &Path, session: &str) -> Result<CodexControl> {
-    let dir = codex_control_dir(root, session);
-    let log_dir = dir.join("logs");
-    fs::create_dir_all(&log_dir).with_context(|| format!("create {}", log_dir.display()))?;
-    let session_socket = codex_session_socket(root, session);
-    if let Some(parent) = session_socket.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    Ok(CodexControl {
-        log_dir,
-        session_socket,
-    })
-}
-
-fn record_codex_control(root: &Path, record: &SessionRecord) -> Result<CodexControl> {
-    let mut control = new_codex_control(root, &record.session)?;
-    if let Some(log_dir) = record
-        .artifacts
-        .get("log_dir")
-        .and_then(|value| value.as_str())
-    {
-        control.log_dir = PathBuf::from(log_dir);
-        fs::create_dir_all(&control.log_dir)
-            .with_context(|| format!("create {}", control.log_dir.display()))?;
-    }
-    if let Some(session_socket) = record
-        .artifacts
-        .get("session_socket")
-        .and_then(|value| value.as_str())
-    {
-        control.session_socket = PathBuf::from(session_socket);
-        if let Some(parent) = control.session_socket.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-    }
-    Ok(control)
-}
-
-fn codex_control_dir(root: &Path, session: &str) -> PathBuf {
-    pandacode_dir(root)
-        .join("codex")
-        .join("runs")
-        .join(crate::io::sanitize_name(session, RUNTIME))
-}
-
-fn codex_session_socket(root: &Path, session: &str) -> PathBuf {
-    let mut hasher = DefaultHasher::new();
-    root.to_string_lossy().hash(&mut hasher);
-    session.hash(&mut hasher);
-    std::env::temp_dir()
-        .join("pandacode-codex")
-        .join(format!("{:016x}.sock", hasher.finish()))
-}
-
-fn codex_legacy_log_dir(root: &Path) -> PathBuf {
-    pandacode_dir(root).join("codex").join("logs")
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use crate::cli::{AnswerCommandArgs, Effort, PermissionMode, RuntimeBins};
-
     use super::*;
 
-    fn bins() -> RuntimeBins {
-        RuntimeBins {
-            codexctl_bin: "codexctl".to_string(),
-            codex_bin: "codex".to_string(),
-            claude_bin: "claude".to_string(),
-            tmux_bin: "tmux".to_string(),
-            log_mode: "summary".to_string(),
-        }
+    #[test]
+    fn permission_maps_to_sandbox_and_approval() {
+        assert_eq!(sandbox_policy(PermissionMode::Max), "danger-full-access");
+        assert_eq!(sandbox_policy(PermissionMode::Limited), "workspace-write");
+        assert_eq!(approval_policy(PermissionMode::Max), "never");
     }
 
     #[test]
-    fn builds_codex_start_with_appserver_session() {
-        let args = TaskCommandArgs {
-            stdin: None,
-            task: Some("fix".to_string()),
-            task_file: None,
-            cd: PathBuf::from("/repo"),
-            session: "latest".to_string(),
-            model: Some("gpt-5.5".to_string()),
-            effort: Some(Effort::Xhigh),
-            permission: None,
-            timeout_ms: Some(120_000),
-            json: false,
-            bins: bins(),
-        };
-        let control = CodexControl {
-            log_dir: PathBuf::from("/repo/.pandacode/codex/runs/s1/logs"),
-            session_socket: PathBuf::from("/tmp/pandacode-codex/s1.sock"),
-        };
-        let command = codex_start_command(
-            &args.bins,
-            Path::new("/tmp/task.md"),
-            Path::new("/repo"),
-            &control,
-            &args,
-            "gpt-5.5",
-            "xhigh",
-        );
-        assert!(command.windows(2).any(|pair| pair == ["session", "start"]));
-        assert!(command.contains(&"--session-socket".to_string()));
-        assert!(command.contains(&"/tmp/pandacode-codex/s1.sock".to_string()));
-        assert!(command.contains(&"--dangerously-full-access".to_string()));
-        assert!(command.contains(&"gpt-5.5".to_string()));
-        assert!(command.contains(&"xhigh".to_string()));
+    fn effective_values_fall_back_to_defaults() {
+        assert_eq!(effective_model(None, None), DEFAULT_MODEL);
+        assert_eq!(effective_model(Some("gpt-6"), None), "gpt-6");
+        assert_eq!(effective_model(None, Some("gpt-6")), "gpt-6");
+        assert_eq!(effective_effort(None, None), DEFAULT_EFFORT);
+        assert_eq!(effective_effort(None, Some("low")), "low");
     }
 
     #[test]
-    fn builds_codex_start_with_limited_permission() {
-        let args = TaskCommandArgs {
-            stdin: None,
-            task: Some("fix".to_string()),
-            task_file: None,
-            cd: PathBuf::from("/repo"),
-            session: "latest".to_string(),
-            model: Some("gpt-5.5".to_string()),
-            effort: Some(Effort::Xhigh),
-            permission: Some(PermissionMode::Limited),
-            timeout_ms: Some(120_000),
-            json: false,
-            bins: bins(),
-        };
-        let control = CodexControl {
-            log_dir: PathBuf::from("/repo/.pandacode/codex/runs/s1/logs"),
-            session_socket: PathBuf::from("/tmp/pandacode-codex/s1.sock"),
-        };
-        let command = codex_start_command(
-            &args.bins,
-            Path::new("/tmp/task.md"),
-            Path::new("/repo"),
-            &control,
-            &args,
-            "gpt-5.5",
-            "xhigh",
-        );
-        assert!(!command.contains(&"--dangerously-full-access".to_string()));
-        assert!(
-            command
-                .windows(2)
-                .any(|pair| pair == ["--sandbox", "workspace-write"])
-        );
-        assert!(
-            command
-                .windows(2)
-                .any(|pair| pair == ["--approval-policy", "never"])
-        );
+    fn choice_answers_resolve_from_recorded_questions() {
+        let mut record = SessionRecord::new(RUNTIME, "s1", "codex-appserver", Path::new("/tmp"));
+        record.artifacts = json!({
+            "pending_questions": [
+                {"question": "Continue?", "options": [{"label": "keep going"}, {"label": "stop here"}]}
+            ]
+        });
+        assert_eq!(choice_answer_text(&record, 2).unwrap(), "stop here");
+        assert_eq!(choice_answer_text(&record, 9).unwrap(), "Option 9");
+        let mut empty = SessionRecord::new(RUNTIME, "s2", "codex-appserver", Path::new("/tmp"));
+        empty.artifacts = json!({});
+        assert_eq!(choice_answer_text(&empty, 1).unwrap(), "Option 1");
+        assert!(choice_answer_text(&empty, 0).is_err());
     }
 
     #[test]
-    fn builds_codex_answer_with_choice() {
-        let args = AnswerCommandArgs {
-            session: "latest".to_string(),
-            cd: PathBuf::from("/repo"),
-            choice: Some(2),
-            text: None,
-            wait: true,
-            timeout_ms: Some(30_000),
-            json: false,
-            bins: bins(),
-        };
-        let control = CodexControl {
-            log_dir: PathBuf::from("/repo/.pandacode/codex/runs/s1/logs"),
-            session_socket: PathBuf::from("/tmp/pandacode-codex/s1.sock"),
-        };
-        let command =
-            codex_answer_command(&args.bins, "run_1", Path::new("/repo"), &control, &args).unwrap();
-        assert!(command.windows(2).any(|pair| pair == ["session", "answer"]));
-        assert!(command.contains(&"--run-id".to_string()));
-        assert!(command.contains(&"run_1".to_string()));
-        assert!(command.contains(&"--session-socket".to_string()));
-        assert!(command.contains(&"--pick".to_string()));
-        assert!(command.contains(&"2".to_string()));
-        assert!(!command.contains(&"--detach".to_string()));
-    }
-
-    #[test]
-    fn detects_codex_transport_errors() {
-        let output = crate::io::CmdOutput {
-            ok: false,
-            exit_code: Some(1),
-            stdout: String::new(),
-            stderr: "Error: daemon returned invalid JSON\nEOF while parsing".to_string(),
-        };
-        assert!(is_codex_transport_error(&output));
+    fn structured_answers_use_question_ids_and_option_labels() {
+        let questions = vec![json!({
+            "id": "q1",
+            "question": "Continue?",
+            "options": [{"label": "keep going"}, {"label": "stop here"}],
+        })];
+        let by_choice = build_structured_answer(&questions, Some(2), None).unwrap();
+        assert_eq!(by_choice["answers"]["q1"]["answers"][0], "stop here");
+        let by_text = build_structured_answer(&questions, None, Some("do it")).unwrap();
+        assert_eq!(by_text["answers"]["q1"]["answers"][0], "do it");
+        assert!(build_structured_answer(&questions, Some(9), None).is_err());
+        let no_id = vec![json!({"question": "Continue?"})];
+        assert!(build_structured_answer(&no_id, None, Some("x")).is_err());
+        assert!(build_structured_answer(&[], None, Some("x")).is_err());
     }
 }

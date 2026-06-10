@@ -79,6 +79,18 @@ return { ok: verdict.passed === true, verdict };
   no total; once `spent() >= total` the next `agent()` throws. (Counts TOTAL
   tokens, not output-only — size budgets accordingly.)
 - `workflow(nameOrRef, args)` — run a saved/sibling workflow inline (1 level deep).
+- `reviewWorktreeDiffs(results, opts?)` — review captured worktree patches before
+  landing. It first preflights the combined patch without mutating cwd, then runs
+  one or more reviewer agents inside a temporary candidate worktree where the
+  combined diff is already applied. It returns
+  `decision:"approve"|"reject"|"needs_owner"`. Only `approve` has
+  `applyReady:true`; `needs_owner` is where product/owner comments and decision
+  gates belong.
+- `applyWorktreeDiff(result)` / `applyWorktreeDiffs(results)` — apply captured
+  `result.worktree` patches back to the main cwd. A batch is atomic by default:
+  ODW checks the combined patch first, then applies it as one patch. Conflicts
+  return `{ ok:false, error:{ category:"patch_conflict" } }` without mutating
+  files. Use `continueOnError:true` only when partial landing is intentional.
 - `phase(title)`, `log(msg)`, `checkpoint(name, value?)`, `promptSlot(...)`.
 - `args` / `input` (the `--input` payload), `odw` (run metadata:
   `{ backend, runId, runDir, statePath, resumeFrom }`), `pandacode`
@@ -91,6 +103,14 @@ return { ok: verdict.passed === true, verdict };
 // Fan out independent edits, each isolated in its own worktree, collect diffs:
 const results = await parallel(TASKS.map((t) => () =>
   agent(t.prompt, { runtime: "codex", isolation: "worktree", label: t.id })));
+const gate = await reviewWorktreeDiffs(results, {
+  label: "batch-gate",
+  reviewerCount: 2,
+  context: "Owner accepts only low-decision-cost changes with evidence."
+});
+if (!gate.applyReady) return { ok: false, gate };
+const landed = applyWorktreeDiffs(results); // atomic by default; use after review
+if (!landed.ok) return { ok: false, landed };
 
 // Pipeline: implement -> verify, per item, no barrier between stages:
 const out = await pipeline(items,
@@ -120,11 +140,57 @@ odw exec --script wf.js --backend mock --json
 # One-command execution graph preview from a mock dry run:
 odw report --script wf.js --open
 
+# Print the reusable large-project starter:
+odw starter parallel-review-apply > wf.js
+
 # Real run through PandaCode:
 odw exec --script wf.js --backend pandacode --json
 # (--json prints only the workflow's return value; drop it to watch live progress)
 ```
 
+- `parallel-review-apply` is the default large-project shape: independent Codex
+  worktrees, a candidate-worktree review gate, bounded repair/re-review
+  (`args.maxReviewRounds`, default 2 for small batches and 3 for 3+ tasks),
+  approve-only atomic landing, then final
+  verification. Repair targets blocker-matched task files when possible and
+  falls back to full-batch repair when blockers are ambiguous. It stops instead
+  of landing on `needs_owner`. Final verification is guarded by a main-worktree
+  snapshot; if the verifier modifies files after approval, the run restores
+  those unapproved changes and fails instead of silently bypassing review.
+  Pass explicit `args.tasks` when you want full control over decomposition. For
+  lower decision cost, pass `args.request` or `args.spec` without `tasks`; the
+  starter first runs a structured planning node that returns owned task files,
+  then sends that plan through the same preflight, review, apply, and
+  verification gates.
+  Every task must declare a stable unique `id`; ODW uses it for node keys,
+  sessions, repair history, and reports. Every task must also declare a
+  non-empty string `prompt`; empty or non-string prompts are rejected before
+  worktrees are created.
+  By default each task must declare ownership with `task.file` / `task.files`
+  and stay inside that declared file list; failed implementation nodes or
+  cross-owned file edits are repaired before any review/apply gate runs. Use
+  the built-in request/spec planner for exploratory decomposition, or pass
+  `allowUndeclaredTaskFiles:true` only when the owner explicitly accepts weaker
+  ownership checks. Declared files must be normalized repo-relative paths outside
+  `.git`, `.odw`, `.pandacode`, and `node_modules`; ODW rejects absolute paths,
+  backslashes, and `..` escapes before creating worktrees. Set
+  `strictTaskFileBoundaries:false` only when the owner explicitly wants
+  cross-file task overlap.
+  Test and documentation tasks should target the declared files and exports from
+  the planned task set. If a required public entrypoint is missing from task
+  ownership, treat it as a planning blocker or add it to a task; do not invent
+  undeclared entrypoints or skip tests to make isolated verification pass.
+  The starter injects the run context and full planned task list into every
+  implementation/repair prompt, so tests, docs, entrypoints, and implementation
+  modules can align on one shared contract even though they run in isolated
+  worktrees.
+  Because isolated worktrees branch from `HEAD`, the starter also refuses to run
+  when declared task files already have uncommitted changes; commit/stash them
+  first, or pass `allowDirtyTaskFiles:true` only when the owner accepts that
+  workers will not see those dirty changes.
+  It also blocks duplicate declared ownership of the same file; merge those
+  tasks, run them serially, or pass `allowDuplicateTaskFiles:true` only when
+  overlapping patches are intentional and reviewable.
 - The workflow's `return` value is printed as `[result] <json>` (or the sole
   output under `--json`). Returning `{ ok:false, ... }` makes `odw exec` exit
   non-zero — usable as a CI/script gate.
@@ -139,20 +205,22 @@ odw exec --script wf.js --backend pandacode --json
   `new Date()` THROW (they break resume). Deterministic forms (`new Date(ts)`,
   other `Math.*`) work. Pass any timestamp/seed via `args`.
 - **Worktree needs committed files:** `isolation:"worktree"` branches from HEAD,
-  so **commit or stage** any spec/fixture the agent must read first. The captured
+  so **commit** any spec/fixture the agent must read first. The captured
   diff comes back in `result.worktree` (always present on a worktree node).
 - **Schema vs no schema:** no schema → final **text string**; schema → validated
   **object**. Schema validation retries only if you set `retry`/`maxAttempts`
   (default is one attempt — unlike the built-in tool, which auto-retries). An
   unloadable schema path fails fast with `schema_load_error`.
 - **Mock dry runs differ from real:** `--backend mock` has no executor, so a
-  no-schema node returns a small *status object* (NOT final text), and a `schema`
-  node always "fails" (mock can't synthesize your JSON, so the run exits non-zero
-  by design). So in a dry run, coerce results defensively
-  (`typeof x === "string" ? x : x.text ?? JSON.stringify(x)`) and don't gate on a
-  schema node passing. A real `--backend pandacode` run returns the final text /
-  validated object as described above. Use mock to prove the *graph shape*
-  (parallel/pipeline/phases), not node outputs.
+  no-schema node returns a small *status object* (NOT final text). Nodes using
+  ODW's packaged schemas return schema-valid synthetic objects so built-in
+  starter flows can be dry-run and graphed without fake schema failures. For
+  custom schemas, design the workflow to tolerate synthetic/mock values or run a
+  real `--backend pandacode` pass before trusting the content. In a dry run,
+  coerce no-schema results defensively
+  (`typeof x === "string" ? x : x.text ?? JSON.stringify(x)`). Use mock to prove
+  the *graph shape* (parallel/pipeline/phases) and packaged-schema wiring, not
+  the semantic quality of node outputs.
 - **Failure is data:** a node that exhausts retries returns
   `{ ok:false, error:{ category, ... } }` — it does **not** throw, so it stays
   truthy and `.filter(Boolean)` keeps it. Drop failed nodes with

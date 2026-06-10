@@ -155,17 +155,17 @@
   <main class="wrap">
     <header>
       <h1>PandaCode CLI Surface</h1>
-      <p>PandaCode v1 is a narrow coding-task executor for three runtimes: Codex through <code>codexctl session</code>, Claude Code through real <code>tmux</code>, and Bamboo as an embedded provider-native coding loop for domestic OpenAI-compatible models.</p>
+      <p>PandaCode is a narrow coding-task executor for three runtimes: Codex directly through <code>codex app-server</code> stdio JSON-RPC, Claude Code through real <code>tmux</code>, and Bamboo as an embedded provider-native coding loop for domestic OpenAI-compatible models.</p>
     </header>
 
     <section class="grid">
       <article class="card">
         <h2>Codex Runtime <span class="tag ok">implemented</span></h2>
-        <p>Uses <code>codexctl session start/send/answer/execute/read/interrupt/stop/list</code>. <code>exec</code> and <code>resume</code> call <code>execute</code> so PandaCode behaves as an executor, not only a planner. Structured questions flow through <code>answer</code>. Defaults to <code>gpt-5.5</code>, <code>xhigh</code> effort, and <code>max</code> permission.</p>
+        <p>Spawns <code>codex app-server</code> per turn and drives <code>thread/start</code>/<code>thread/resume</code> + <code>turn/start</code> over stdio JSON-RPC in default collaboration mode. Structured questions pause as <code>waiting_for_user</code> and <code>answer</code> continues the thread. Defaults to <code>gpt-5.5</code>, <code>xhigh</code> effort, and <code>max</code> permission.</p>
       </article>
       <article class="card">
         <h2>Claude Runtime <span class="tag ok">implemented</span></h2>
-        <p>Starts Claude Code inside tmux with isolated local settings, inline PandaCode-owned hook settings, and an empty strict MCP config. Defaults to <code>opus</code>, <code>max</code> effort, and <code>max</code> permission. It pastes tasks into the TUI, waits for an explicit completion marker, records hook events, and reads visible/log output from tmux. The banned <code>claude -p</code> stream-json path is not used.</p>
+        <p>Starts Claude Code inside tmux with isolated local settings, inline PandaCode-owned hook settings, and an empty strict MCP config. Defaults to <code>fable</code>, <code>xhigh</code> effort, and <code>max</code> permission. It pastes tasks into the TUI, waits for an explicit completion marker, records hook events, and reads visible/log output from tmux. The banned <code>claude -p</code> stream-json path is not used.</p>
       </article>
       <article class="card">
         <h2>Bamboo Runtime <span class="tag ok">implemented</span></h2>
@@ -212,7 +212,7 @@ pandacode claude resume --session latest --task "continue" --cd .</code></pre>
             <tr>
               <td><code>answer</code></td>
               <td>Answer a runtime prompt waiting for user input.</td>
-              <td>Claude maps to visible AskUserQuestion options; Codex maps <code>--choice N</code> to <code>codexctl session answer --pick N</code>.</td>
+              <td>Claude maps to visible AskUserQuestion options; Codex maps <code>--choice N</code> to the recorded pending question options and answers via a resume turn.</td>
             </tr>
             <tr>
               <td><code>status</code></td>
@@ -237,7 +237,7 @@ pandacode claude resume --session latest --task "continue" --cd .</code></pre>
             <tr>
               <td><code>models</code></td>
               <td>List model choices for a runtime.</td>
-              <td>Codex delegates to <code>codexctl models</code>; Bamboo returns its built-in domestic model catalog.</td>
+              <td>Codex queries <code>model/list</code> on the app-server; Bamboo returns its built-in domestic model catalog.</td>
             </tr>
             <tr>
               <td><code>interrupt</code></td>

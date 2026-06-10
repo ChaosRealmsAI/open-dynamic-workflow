@@ -124,7 +124,7 @@ Direct runner:
 - run: `odw exec --script <workflow.js> --input <json> --backend <mock|pandacode>`
 - observe: `odw runs show latest`
 - resume a direct run: `odw exec --resume latest`
-- list runs: `odw runs list --path .`
+- list runs: `odw runs list --path .` (`--json` keeps the raw records)
 
 Use `odw workflows remove <name>` for filesystem cleanup.
 

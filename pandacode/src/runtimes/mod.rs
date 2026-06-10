@@ -1,11 +1,12 @@
 pub mod bamboo;
 pub mod claude;
 pub mod codex;
+pub(crate) mod codex_appserver;
 
 use std::{env, str::FromStr};
 
 use anyhow::{Result, anyhow};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     cli::{
@@ -252,7 +253,7 @@ fn bamboo_provider_for_model(model: &str) -> Option<ProviderKind> {
 
 fn is_claude_model_hint(model: &str) -> bool {
     let model = model.trim().to_ascii_lowercase();
-    matches!(model.as_str(), "haiku" | "sonnet" | "opus") || model.starts_with("claude-")
+    matches!(model.as_str(), "haiku" | "sonnet" | "opus" | "fable") || model.starts_with("claude-")
 }
 
 fn is_codex_model_hint(model: &str) -> bool {
@@ -273,13 +274,12 @@ fn reject_provider_for_delegated_runtime(provider: Option<&str>, _runtime: &str)
     Ok(())
 }
 
-
 pub async fn doctor(args: GlobalArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
     let codex = codex::doctor_report(&root, &args.bins)?;
     let claude = claude::doctor_report(&root, &args.bins)?;
     let bamboo = bamboo::doctor_report(&root, &args.bins).await?;
-    output_json(&json!({
+    let report = json!({
         "ok": codex.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
             || claude.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
             || bamboo.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -287,17 +287,29 @@ pub async fn doctor(args: GlobalArgs) -> Result<()> {
         "codex": codex,
         "claude": claude,
         "bamboo": bamboo
-    }))
+    });
+    if args.json {
+        output_json(&report)
+    } else {
+        println!("{}", format_doctor_summary(&report));
+        Ok(())
+    }
 }
 
 pub fn list_all(args: GlobalArgs) -> Result<()> {
     let root = workspace(&args.cd)?;
-    output_json(&json!({
+    let report = json!({
         "ok": true,
         "codex": session::list(&root, "codex")?,
         "claude": session::list(&root, "claude")?,
         "bamboo": session::list(&root, "bamboo")?
-    }))
+    });
+    if args.json {
+        output_json(&report)
+    } else {
+        println!("{}", format_session_list_summary(&report));
+        Ok(())
+    }
 }
 
 pub async fn models_all(args: GlobalArgs) -> Result<()> {
@@ -305,11 +317,328 @@ pub async fn models_all(args: GlobalArgs) -> Result<()> {
     let codex = codex::models_report(&root, &args.bins)?;
     let claude = claude::models_report(&root, &args.bins)?;
     let bamboo = bamboo::models_report(&root, None).await?;
-    output_json(&json!({
+    let report = json!({
         "ok": true,
         "codex": codex,
         "claude": claude,
         "bamboo": bamboo
+    });
+    if args.json {
+        output_json(&report)
+    } else {
+        println!("{}", format_models_summary(&report));
+        Ok(())
+    }
+}
+
+fn format_doctor_summary(report: &Value) -> String {
+    let status = if report_bool(report, "ok") {
+        "usable"
+    } else {
+        "needs setup"
+    };
+    let mut lines = vec![format!("PandaCode doctor: {status}")];
+    for runtime in ["bamboo", "claude", "codex"] {
+        let runtime_report = &report[runtime];
+        let runtime_status = if report_bool(runtime_report, "ok") {
+            "available".to_string()
+        } else {
+            report_str(runtime_report, "state")
+                .unwrap_or("unavailable")
+                .to_string()
+        };
+        let mut details = vec![format!("  - {runtime}: {runtime_status}")];
+        if let Some(driver) = report_str(runtime_report, "driver") {
+            details.push(format!("driver={driver}"));
+        }
+        if let Some(active) = format_bamboo_active(runtime_report) {
+            details.push(format!("active={active}"));
+        }
+        let missing = string_array(&runtime_report["missing"]);
+        if !missing.is_empty() {
+            details.push(format!("missing={}", missing.join(",")));
+        }
+        lines.push(details.join(" "));
+    }
+    lines.push("JSON: pandacode doctor --json".to_string());
+    lines.join("\n")
+}
+
+fn format_session_list_summary(report: &Value) -> String {
+    let mut lines = vec!["PandaCode sessions".to_string()];
+    for runtime in ["bamboo", "claude", "codex"] {
+        let sessions = report[runtime].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        let mut line = format!("  - {runtime}: {}", sessions.len());
+        if let Some(latest) = sessions.first() {
+            if let Some(session) = report_str(latest, "session") {
+                line.push_str(&format!(" latest={session}"));
+            }
+            if let Some(model) = report_str(latest, "model") {
+                line.push_str(&format!(" model={model}"));
+            }
+            if let Some(run_id) = report_str(latest, "run_id") {
+                line.push_str(&format!(" run={run_id}"));
+            }
+        }
+        lines.push(line);
+    }
+    lines.push("JSON: pandacode list --json".to_string());
+    lines.join("\n")
+}
+
+fn format_models_summary(report: &Value) -> String {
+    let mut lines = vec!["PandaCode models".to_string()];
+    lines.push(format_model_runtime_summary("bamboo", &report["bamboo"]));
+    lines.push(format_model_runtime_summary("claude", &report["claude"]));
+    lines.push(format_model_runtime_summary("codex", &report["codex"]));
+    lines.push("JSON: pandacode models --json".to_string());
+    lines.join("\n")
+}
+
+fn format_model_runtime_summary(runtime: &str, report: &Value) -> String {
+    let mut parts = vec![format!(
+        "  - {runtime}: {}",
+        if report_bool(report, "ok") {
+            "ok"
+        } else {
+            "unavailable"
+        }
+    )];
+    match runtime {
+        "bamboo" => {
+            let models = report["raw"]["models"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            parts.push(format!("models={}", models.len()));
+            let defaults = models
+                .iter()
+                .filter(|model| report_bool(model, "is_default"))
+                .filter_map(format_provider_model)
+                .collect::<Vec<_>>();
+            if !defaults.is_empty() {
+                parts.push(format!("defaults={}", join_limited(defaults, 4)));
+            }
+        }
+        "claude" => {
+            let aliases = string_array(&report["known_aliases"]);
+            if !aliases.is_empty() {
+                parts.push(format!("aliases={}", aliases.join(", ")));
+            }
+        }
+        "codex" => {
+            let models = report["raw"]["models"]
+                .as_array()
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            parts.push(format!("models={}", models.len()));
+            let defaults = models
+                .iter()
+                .filter(|model| report_bool(model, "is_default"))
+                .filter_map(format_model_id)
+                .collect::<Vec<_>>();
+            if !defaults.is_empty() {
+                parts.push(format!("default={}", join_limited(defaults, 1)));
+            }
+        }
+        _ => {}
+    }
+    parts.join(" ")
+}
+
+fn format_bamboo_active(report: &Value) -> Option<String> {
+    let active = &report["active"];
+    let provider = report_str(active, "provider")?;
+    let model = report_str(active, "model")?;
+    Some(format!("{provider}/{model}"))
+}
+
+fn format_provider_model(model: &Value) -> Option<String> {
+    let provider = report_str(model, "provider")?;
+    let id = report_str(model, "id")
+        .or_else(|| report_str(model, "model"))
+        .unwrap_or("unknown");
+    Some(format!("{provider}/{id}"))
+}
+
+fn format_model_id(model: &Value) -> Option<String> {
+    report_str(model, "id")
+        .or_else(|| report_str(model, "model"))
+        .map(ToString::to_string)
+}
+
+fn report_bool(report: &Value, key: &str) -> bool {
+    report.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn report_str<'a>(report: &'a Value, key: &str) -> Option<&'a str> {
+    report.get(key).and_then(Value::as_str)
+}
+
+fn string_array(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn join_limited(values: Vec<String>, limit: usize) -> String {
+    if values.len() <= limit {
+        return values.join(", ");
+    }
+    let hidden = values.len() - limit;
+    let mut visible = values.into_iter().take(limit).collect::<Vec<_>>();
+    visible.push(format!("+{hidden}"));
+    visible.join(", ")
+}
+
+pub fn wait_sessions(args: crate::cli::WaitCommandArgs) -> Result<()> {
+    let root = crate::io::workspace(&args.cd)?;
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_millis(args.timeout_ms);
+    // Grace window for a freshly-launched lane to write its first record.
+    // After it elapses, a session still missing a record is treated as a
+    // never-started lane (typo'd name / launch failed) and fails fast instead
+    // of silently waiting out the full timeout.
+    let grace = std::time::Duration::from_millis(args.interval_ms.saturating_mul(3).max(10_000));
+    fn terminal(state: &str) -> bool {
+        matches!(
+            state,
+            "completed" | "failed" | "timeout" | "stopped" | "interrupted" | "no_report" | "blocked"
+        )
+    }
+    loop {
+        let mut lanes = serde_json::Map::new();
+        let mut all_settled = true;
+        let mut any_waiting = false;
+        let mut pending_names = Vec::new();
+        for name in &args.sessions {
+            let (runtime, state) = match session::resolve_runtime_for_session(&root, name) {
+                Ok(runtime) => match session::load(&root, &runtime, name) {
+                    Ok(record) => {
+                        let state = record.artifacts["status"]
+                            .as_str()
+                            .unwrap_or("unknown")
+                            .to_string();
+                        (runtime, state)
+                    }
+                    Err(_) => (runtime, "pending".to_string()),
+                },
+                Err(_) => ("unknown".to_string(), "pending".to_string()),
+            };
+            if state == "pending" {
+                pending_names.push(name.clone());
+            }
+            if state == "waiting_for_user" {
+                any_waiting = true;
+            } else if !terminal(&state) {
+                all_settled = false;
+            }
+            lanes.insert(
+                name.clone(),
+                serde_json::json!({ "runtime": runtime, "state": state }),
+            );
+        }
+        // Fast-fail: a lane that never produced a record after the grace window.
+        if !pending_names.is_empty() && started.elapsed() >= grace {
+            crate::io::output_json(&serde_json::json!({
+                "ok": false,
+                "action": "wait",
+                "state": "missing_session",
+                "sessions": lanes,
+                "missing_sessions": pending_names,
+                "error": "session(s) never started a turn; check the session name(s)",
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            }))?;
+            return Err(crate::io::JsonAlreadyEmitted.into());
+        }
+        let timed_out = std::time::Instant::now() >= deadline;
+        if all_settled || any_waiting || timed_out {
+            let missing = args
+                .expect_artifact
+                .iter()
+                .filter(|path| !root.join(path).exists())
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            let all_completed = lanes.values().all(|lane| lane["state"] == "completed");
+            let ok = all_completed && missing.is_empty() && !any_waiting;
+            let state = if ok {
+                "completed"
+            } else if any_waiting {
+                "waiting_for_user"
+            } else if timed_out && !all_settled {
+                "timeout"
+            } else if all_completed && !missing.is_empty() {
+                "no_report"
+            } else {
+                "failed"
+            };
+            crate::io::output_json(&serde_json::json!({
+                "ok": ok,
+                "action": "wait",
+                "state": state,
+                "sessions": lanes,
+                "missing_artifacts": missing,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            }))?;
+            if ok {
+                return Ok(());
+            }
+            return Err(crate::io::JsonAlreadyEmitted.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(args.interval_ms));
+    }
+}
+
+pub fn gc_sessions(args: crate::cli::GcCommandArgs) -> Result<()> {
+    let root = crate::io::workspace(&args.cd)?;
+    let base = crate::io::pandacode_dir(&root);
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(args.days.saturating_mul(86_400)))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    // Only PandaCode-owned transient outputs. Never touch `sessions/` (state),
+    // `codex/codex-home` (thread history), or `codex/appserver-pids`.
+    let prunable = ["prompts", "logs", "events", "detached"];
+    let mut removed = Vec::new();
+    let mut bytes_freed: u64 = 0;
+    for runtime in ["codex", "claude", "bamboo"] {
+        for sub in prunable {
+            let dir = base.join(runtime).join(sub);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_file() {
+                    continue;
+                }
+                let old = meta
+                    .modified()
+                    .map(|m| m < cutoff)
+                    .unwrap_or(false);
+                if !old {
+                    continue;
+                }
+                bytes_freed += meta.len();
+                removed.push(path.to_string_lossy().to_string());
+                if !args.dry_run {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+    crate::io::output_json(&serde_json::json!({
+        "ok": true,
+        "action": "gc",
+        "dry_run": args.dry_run,
+        "days": args.days,
+        "removed_count": removed.len(),
+        "bytes_freed": bytes_freed,
+        "removed": removed,
     }))
 }
 
@@ -335,8 +664,12 @@ fn version_report(program: &str, args: &[&str]) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvedRuntime, bamboo_provider_for_model, runtime_hint_for_model};
+    use super::{
+        ResolvedRuntime, bamboo_provider_for_model, format_doctor_summary, format_models_summary,
+        format_session_list_summary, runtime_hint_for_model,
+    };
     use crate::config::ProviderKind;
+    use serde_json::json;
 
     #[test]
     fn model_hints_route_to_matching_runtime() {
@@ -350,6 +683,10 @@ mod tests {
         );
         assert_eq!(
             runtime_hint_for_model("opus"),
+            Some(ResolvedRuntime::Claude)
+        );
+        assert_eq!(
+            runtime_hint_for_model("fable"),
             Some(ResolvedRuntime::Claude)
         );
         assert_eq!(
@@ -374,5 +711,115 @@ mod tests {
             Some(ProviderKind::Minimax)
         );
         assert_eq!(bamboo_provider_for_model("opus"), None);
+    }
+
+    #[test]
+    fn doctor_summary_highlights_runtime_state() {
+        let summary = format_doctor_summary(&json!({
+            "ok": true,
+            "bamboo": {
+                "ok": false,
+                "state": "configuration_needed",
+                "driver": "bamboo-native",
+                "missing": ["api_key"],
+                "active": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-pro"
+                }
+            },
+            "claude": {
+                "ok": true,
+                "state": "available",
+                "driver": "tmux",
+                "missing": []
+            },
+            "codex": {
+                "ok": true,
+                "state": "available",
+                "driver": "codex app-server",
+                "missing": []
+            }
+        }));
+
+        assert!(summary.contains("PandaCode doctor: usable"));
+        assert!(summary.contains("bamboo: configuration_needed"));
+        assert!(summary.contains("active=deepseek/deepseek-v4-pro"));
+        assert!(summary.contains("missing=api_key"));
+        assert!(summary.contains("claude: available"));
+        assert!(summary.contains("codex: available"));
+        assert!(summary.contains("JSON: pandacode doctor --json"));
+        assert!(!summary.contains('{'));
+    }
+
+    #[test]
+    fn models_summary_compacts_runtime_catalogs() {
+        let summary = format_models_summary(&json!({
+            "ok": true,
+            "bamboo": {
+                "ok": true,
+                "raw": {
+                    "models": [
+                        {
+                            "provider": "deepseek",
+                            "id": "deepseek-v4-pro",
+                            "is_default": true
+                        },
+                        {
+                            "provider": "kimi",
+                            "id": "kimi-k2.6",
+                            "is_default": true
+                        }
+                    ]
+                }
+            },
+            "claude": {
+                "ok": true,
+                "known_aliases": ["haiku", "sonnet", "opus", "fable"]
+            },
+            "codex": {
+                "ok": true,
+                "raw": {
+                    "models": [
+                        {
+                            "id": "gpt-5.5",
+                            "is_default": true
+                        },
+                        {
+                            "id": "gpt-5.4",
+                            "is_default": false
+                        }
+                    ]
+                }
+            }
+        }));
+
+        assert!(summary.contains("bamboo: ok models=2"));
+        assert!(summary.contains("defaults=deepseek/deepseek-v4-pro, kimi/kimi-k2.6"));
+        assert!(summary.contains("claude: ok aliases=haiku, sonnet, opus, fable"));
+        assert!(summary.contains("codex: ok models=2 default=gpt-5.5"));
+        assert!(summary.contains("JSON: pandacode models --json"));
+        assert!(!summary.contains('{'));
+    }
+
+    #[test]
+    fn session_list_summary_counts_and_shows_latest() {
+        let summary = format_session_list_summary(&json!({
+            "ok": true,
+            "bamboo": [],
+            "claude": [],
+            "codex": [
+                {
+                    "session": "latest",
+                    "model": "gpt-5.5",
+                    "run_id": "run_123"
+                }
+            ]
+        }));
+
+        assert!(summary.contains("bamboo: 0"));
+        assert!(summary.contains("claude: 0"));
+        assert!(summary.contains("codex: 1 latest=latest model=gpt-5.5 run=run_123"));
+        assert!(summary.contains("JSON: pandacode list --json"));
+        assert!(!summary.contains('{'));
     }
 }

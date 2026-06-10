@@ -4,7 +4,7 @@ use std::{
     net::{TcpListener, TcpStream},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -34,6 +34,72 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
+#[test]
+fn run_help_explains_common_task_options() {
+    let output = Command::new(bin())
+        .args(["run", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let help = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "Inline task text",
+        "Read task text from a file",
+        "Workspace directory",
+        "Runtime to use",
+        "Print machine-readable JSON",
+        "Wait timeout in milliseconds",
+    ] {
+        assert!(
+            help.contains(expected),
+            "missing help text {expected}: {help}"
+        );
+    }
+}
+
+#[test]
+fn top_level_list_defaults_to_compact_text_and_json_remains_machine_readable() {
+    let root = temp_root("list-compact");
+
+    let output = Command::new(bin())
+        .args(["list", "--cd", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("PandaCode sessions"), "{text}");
+    assert!(text.contains("bamboo: 0"), "{text}");
+    assert!(text.contains("claude: 0"), "{text}");
+    assert!(text.contains("codex: 0"), "{text}");
+    assert!(text.contains("JSON: pandacode list --json"), "{text}");
+    assert!(!text.contains('{'), "{text}");
+
+    let output = Command::new(bin())
+        .args(["list", "--json", "--cd", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["bamboo"].as_array().unwrap().len(), 0);
+    assert_eq!(json["claude"].as_array().unwrap().len(), 0);
+    assert_eq!(json["codex"].as_array().unwrap().len(), 0);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn write_exe(path: &Path, content: &str) {
     fs::write(path, content).unwrap();
     let mut perms = fs::metadata(path).unwrap().permissions();
@@ -41,72 +107,74 @@ fn write_exe(path: &Path, content: &str) {
     fs::set_permissions(path, perms).unwrap();
 }
 
-fn fake_codexctl(path: &Path) {
-    write_exe(
-        path,
-        r#"#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${1:-}" == "--help" ]]; then
-  echo "fake codexctl help"
-  exit 0
-fi
-if [[ "${1:-}" == "models" ]]; then
-  printf '{"models":[{"id":"gpt-5.5","efforts":["low","medium","high","xhigh"]}]}\n'
-  exit 0
-fi
-if [[ "${1:-}" == "session" ]]; then
-  action="${2:-}"
-  case "$action" in
-    start)
-      printf '{"run_id":"run_fake","thread_id":"thread_fake","thread_path":"/tmp/thread.jsonl","status":"completed","current_phase":"completed"}\n'
-      ;;
-    send)
-      printf '{"run_id":"run_fake","status":"completed","current_phase":"completed","last_agent_message":"continued"}\n'
-      ;;
-    answer)
-      printf '{"run_id":"run_fake","status":"completed","current_phase":"completed","last_agent_message":"answered"}\n'
-      ;;
-    execute)
-      printf '{"run_id":"run_fake","status":"completed","current_phase":"completed","last_agent_message":"implemented"}\n'
-      ;;
-    resume)
-      printf '{"run_id":"run_resumed","thread_id":"thread_fake","status":"completed"}\n'
-      ;;
-    read)
-      printf '{"run_id":"run_fake","status":"completed","current_phase":"completed","last_agent_message":"fake read"}\n'
-      ;;
-    interrupt)
-      printf '{"run_id":"run_fake","status":"interrupted"}\n'
-      ;;
-    stop)
-      printf '{"run_id":"run_fake","status":"stopped"}\n'
-      ;;
-    list)
-      printf '{"runs":[{"run_id":"run_fake","status":"completed"}]}\n'
-      ;;
-    *)
-      echo "unknown session action $action" >&2
-      exit 2
-      ;;
-  esac
-  exit 0
-fi
-echo "unknown fake codexctl args: $*" >&2
-exit 2
-"#,
-    );
-}
+fn fake_codex_appserver(path: &Path) {
+    let py = path.with_extension("py");
+    fs::write(
+        &py,
+        r#"
+import json, os, sys, time
 
-fn fake_codex(path: &Path) {
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+asked = False
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    msg = json.loads(line)
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method is None:
+        if mid == 999:
+            send({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "answered:" + json.dumps(msg.get("result"))}}})
+            send({"method": "thread/tokenUsage/updated", "params": {"total": {"input_tokens": 11, "output_tokens": 6}}})
+            send({"method": "turn/completed", "params": {"turn": {"id": "turn_fake", "status": "completed"}}})
+        continue
+    if method == "initialize":
+        send({"id": mid, "result": {"codexHome": "/tmp"}})
+    elif method in ("thread/start", "thread/resume"):
+        send({"id": mid, "result": {"thread": {"id": "thread_fake", "path": "/tmp/thread_fake.jsonl"}, "model": "gpt-5.5"}})
+    elif method == "turn/start":
+        send({"id": mid, "result": {"turn": {"id": "turn_fake"}}})
+        if os.environ.get("FAKE_TURN_SLEEP"):
+            time.sleep(float(os.environ["FAKE_TURN_SLEEP"]))
+        if os.environ.get("FAKE_REQUEST_USER_INPUT") and not asked:
+            asked = True
+            send({"id": 999, "method": "item/tool/requestUserInput", "params": {"questions": [{"id": "q1", "question": "How should this continue?", "options": [{"label": "keep going"}, {"label": "stop here"}]}]}})
+            continue
+        try:
+            text = msg["params"]["input"][0]["text"]
+        except Exception:
+            text = ""
+        send({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "implemented:" + text[:200]}}})
+        send({"method": "thread/tokenUsage/updated", "params": {"total": {"input_tokens": 10, "output_tokens": 5}}})
+        send({"method": "turn/completed", "params": {"turn": {"id": "turn_fake", "status": "completed"}}})
+    elif method == "model/list":
+        send({"id": mid, "result": {"data": [{"id": "gpt-5.5", "displayName": "GPT-5.5", "isDefault": True, "supportedReasoningEfforts": ["low", "medium", "high", "xhigh"]}]}})
+    elif mid is not None:
+        send({"id": mid, "result": {}})
+"#,
+    )
+    .unwrap();
     write_exe(
         path,
-        r#"#!/usr/bin/env bash
-if [[ "${1:-}" == "--help" ]]; then
+        &format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${{1:-}}" == "--help" ]]; then
   echo "fake codex help"
   exit 0
 fi
-echo "fake codex"
+if [[ "${{1:-}}" == "app-server" ]]; then
+  exec /usr/bin/env python3 "{py}" app-server
+fi
+echo "unknown fake codex args: $*" >&2
+exit 2
 "#,
+            py = py.display()
+        ),
     );
 }
 
@@ -715,10 +783,8 @@ fn top_level_run_infers_codex_from_model() {
     let root = temp_root("agent-model-infers-codex");
     let bin_dir = root.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let codexctl = bin_dir.join("codexctl");
     let codex = bin_dir.join("codex");
-    fake_codexctl(&codexctl);
-    fake_codex(&codex);
+    fake_codex_appserver(&codex);
 
     let output = Command::new(bin())
         .args([
@@ -731,8 +797,6 @@ fn top_level_run_infers_codex_from_model() {
             "xhigh",
             "--cd",
             root.to_str().unwrap(),
-            "--codexctl-bin",
-            codexctl.to_str().unwrap(),
             "--codex-bin",
             codex.to_str().unwrap(),
         ])
@@ -852,9 +916,9 @@ fn models_json_reports_permission_capabilities() {
     let root = temp_root("models-permissions");
     let bin_dir = root.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let codexctl = bin_dir.join("codexctl");
+    let codex = bin_dir.join("codex");
     let claude = bin_dir.join("claude");
-    fake_codexctl(&codexctl);
+    fake_codex_appserver(&codex);
     fake_claude(&claude);
 
     let output = Command::new(bin())
@@ -863,8 +927,8 @@ fn models_json_reports_permission_capabilities() {
             "--json",
             "--cd",
             root.to_str().unwrap(),
-            "--codexctl-bin",
-            codexctl.to_str().unwrap(),
+            "--codex-bin",
+            codex.to_str().unwrap(),
             "--claude-bin",
             claude.to_str().unwrap(),
         ])
@@ -922,20 +986,16 @@ fn bamboo_blocked_run_emits_single_json_object() {
 }
 
 #[test]
-fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
+fn codex_runtime_exec_resume_observe_and_stop_with_fake_appserver() {
     let root = temp_root("codex");
     let bin_dir = root.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
-    let codexctl = bin_dir.join("codexctl");
     let codex = bin_dir.join("codex");
-    fake_codexctl(&codexctl);
-    fake_codex(&codex);
+    fake_codex_appserver(&codex);
 
     let common = [
         "--cd",
         root.to_str().unwrap(),
-        "--codexctl-bin",
-        codexctl.to_str().unwrap(),
         "--codex-bin",
         codex.to_str().unwrap(),
     ];
@@ -950,13 +1010,16 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
         String::from_utf8_lossy(&output.stderr)
     );
     let exec: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(exec["record"]["run_id"], "run_fake");
-    assert_eq!(exec["summary"]["last_agent_message"], "implemented");
-    assert_eq!(exec["start"]["action"], "start");
-    assert_eq!(exec["execute"]["action"], "execute");
-    assert!(exec.get("raw").is_none());
-    assert!(exec["execute"].get("stdout").is_none());
-    assert!(exec["execute"].get("stdout_tail").is_some());
+    assert_eq!(exec["ok"], true);
+    assert_eq!(exec["state"], "completed");
+    assert_eq!(exec["record"]["thread_id"], "thread_fake");
+    assert!(
+        exec["summary"]["last_agent_message"]
+            .as_str()
+            .unwrap()
+            .starts_with("implemented:")
+    );
+    assert!(exec["summary"]["usage"]["total"]["input_tokens"].is_number());
 
     let output = Command::new(bin())
         .args(["codex", "status", "--session", "latest"])
@@ -965,13 +1028,13 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
         .unwrap();
     assert!(output.status.success());
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(status.get("stdout").is_none());
-    assert_eq!(status["summary"]["last_agent_message"], "fake read");
+    assert_eq!(status["ok"], true);
+    assert_eq!(status["state"], "completed");
     assert!(
-        status["output_tail"]
+        status["summary"]["last_agent_message"]
             .as_str()
             .unwrap()
-            .contains("fake read")
+            .starts_with("implemented:")
     );
 
     let output = Command::new(bin())
@@ -981,12 +1044,10 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
         .unwrap();
     assert!(output.status.success());
     let logs: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(logs.get("stdout").is_none());
-    assert_eq!(logs["summary"]["last_agent_message"], "fake read");
+    assert_eq!(logs["ok"], true);
+    assert!(logs["log_tail"].as_str().unwrap().contains("turn/completed"));
 
     for args in [
-        vec!["codex", "status", "--session", "latest"],
-        vec!["codex", "logs", "--session", "latest", "--json"],
         vec!["codex", "artifacts", "--session", "latest"],
         vec![
             "codex",
@@ -999,11 +1060,7 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
             "xhigh",
         ],
     ] {
-        let output = Command::new(bin())
-            .args(args)
-            .args(common)
-            .output()
-            .unwrap();
+        let output = Command::new(bin()).args(args).args(common).output().unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -1029,19 +1086,345 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
         String::from_utf8_lossy(&output.stderr)
     );
     let resume: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(resume["summary"]["last_agent_message"], "implemented");
-    assert_eq!(resume["send"]["action"], "send");
-    assert_eq!(resume["execute"]["action"], "execute");
-    assert!(resume.get("raw").is_none());
+    assert_eq!(resume["state"], "completed");
+    assert!(
+        resume["summary"]["last_agent_message"]
+            .as_str()
+            .unwrap()
+            .contains("continue")
+    );
+
+    let output = Command::new(bin())
+        .args([
+            "codex", "answer", "--session", "latest", "--text", "go", "--wait",
+        ])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["state"], "completed");
+    assert!(
+        answer["summary"]["last_agent_message"]
+            .as_str()
+            .unwrap()
+            .contains("go")
+    );
+
+    let output = Command::new(bin())
+        .args(["codex", "models"])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let models: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(models["ok"], true);
+    assert_eq!(models["models"][0]["id"], "gpt-5.5");
+
+    for args in [
+        vec!["codex", "interrupt", "--session", "latest"],
+        vec!["codex", "stop", "--session", "latest"],
+        vec!["codex", "list"],
+        vec!["codex", "doctor"],
+    ] {
+        let output = Command::new(bin()).args(args).args(common).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_status_is_visible_while_start_is_running() {
+    let root = temp_root("codex-start-visible");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let codex = bin_dir.join("codex");
+    fake_codex_appserver(&codex);
+
+    let common = [
+        "--cd",
+        root.to_str().unwrap(),
+        "--codex-bin",
+        codex.to_str().unwrap(),
+    ];
+    let child = Command::new(bin())
+        .env("FAKE_TURN_SLEEP", "2")
+        .args(["codex", "exec", "--task", "slow start", "--session", "slow"])
+        .args(common)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let record_path = root.join(".pandacode/sessions/codex/slow.json");
+    let mut running_seen = false;
+    for _ in 0..100 {
+        if record_path.exists()
+            && let Ok(text) = fs::read_to_string(&record_path)
+            && let Ok(record) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            let status = record["artifacts"]["status"].as_str().unwrap_or("");
+            if status == "starting" || status == "running" {
+                running_seen = true;
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        running_seen,
+        "codex session record should be visible while the turn is still running"
+    );
+
+    let output = Command::new(bin())
+        .args(["codex", "status", "--session", "slow"])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(matches!(
+        status["state"].as_str().unwrap(),
+        "starting" | "running" | "completed"
+    ));
+
+    let output = Command::new(bin())
+        .args(["list", "--cd", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let list = String::from_utf8_lossy(&output.stdout);
+    assert!(list.contains("codex: 1"), "{list}");
+
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exec: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(exec["state"], "completed");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_orphaned_appserver_is_reaped_on_next_run() {
+    let root = temp_root("codex-orphan-reap");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let codex = bin_dir.join("codex");
+    fake_codex_appserver(&codex);
+    let common = [
+        "--cd",
+        root.to_str().unwrap(),
+        "--codex-bin",
+        codex.to_str().unwrap(),
+    ];
+
+    let mut child = Command::new(bin())
+        .env("FAKE_TURN_SLEEP", "30")
+        .args(["codex", "exec", "--task", "long turn", "--session", "orphan"])
+        .args(common)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let record_path = root.join(".pandacode/sessions/codex/orphan.json");
+    let mut turn_running = false;
+    for _ in 0..100 {
+        if let Ok(text) = fs::read_to_string(&record_path)
+            && let Ok(record) = serde_json::from_str::<serde_json::Value>(&text)
+            && record["artifacts"]["status"] == "running"
+        {
+            turn_running = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(turn_running, "exec should reach the running state");
+    thread::sleep(Duration::from_millis(300));
+
+    let pid_dir = root.join(".pandacode/codex/appserver-pids");
+    let appserver_pid = fs::read_dir(&pid_dir)
+        .unwrap()
+        .flatten()
+        .next()
+        .and_then(|entry| entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()))
+        .expect("app-server pid file should exist while the turn runs");
+
+    // SIGKILL pandacode so destructors never run; the app-server is orphaned.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    thread::sleep(Duration::from_millis(300));
+    let alive = Command::new("/bin/kill")
+        .args(["-0", &appserver_pid.to_string()])
+        .status()
+        .unwrap()
+        .success();
+    assert!(alive, "fake app-server should still be alive after pandacode dies");
+
+    let output = Command::new(bin())
+        .args(["codex", "doctor"])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut reaped = false;
+    for _ in 0..40 {
+        let alive = Command::new("/bin/kill")
+            .args(["-0", &appserver_pid.to_string()])
+            .status()
+            .unwrap()
+            .success();
+        if !alive {
+            reaped = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        reaped,
+        "orphaned app-server should be killed by the next pandacode codex command"
+    );
+    assert!(!pid_dir.join(appserver_pid.to_string()).exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_detached_exec_answers_structurally_in_same_turn() {
+    let root = temp_root("codex-detach-answer");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let codex = bin_dir.join("codex");
+    fake_codex_appserver(&codex);
+    let common = [
+        "--cd",
+        root.to_str().unwrap(),
+        "--codex-bin",
+        codex.to_str().unwrap(),
+    ];
+
+    let output = Command::new(bin())
+        .env("FAKE_REQUEST_USER_INPUT", "1")
+        .args([
+            "codex", "exec", "--detach", "--session", "bg", "--task", "ask then continue",
+        ])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exec: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(exec["detached"], true);
+    assert_eq!(exec["state"], "running");
+
+    let record_path = root.join(".pandacode/sessions/codex/bg.json");
+    let mut waiting = false;
+    for _ in 0..100 {
+        if let Ok(text) = fs::read_to_string(&record_path)
+            && let Ok(record) = serde_json::from_str::<serde_json::Value>(&text)
+            && record["artifacts"]["status"] == "waiting_for_user"
+        {
+            assert_eq!(record["artifacts"]["pending_questions"][0]["id"], "q1");
+            waiting = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(waiting, "detached worker should reach waiting_for_user");
+
+    let output = Command::new(bin())
+        .args(["codex", "answer", "--session", "bg", "--choice", "2", "--wait"])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["answer_mode"], "structured");
+    assert_eq!(answer["state"], "completed");
+    let message = answer["summary"]["last_agent_message"].as_str().unwrap();
+    assert!(message.starts_with("answered:"), "{message}");
+    assert!(message.contains("stop here"), "{message}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_request_user_input_pauses_and_answer_resumes() {
+    let root = temp_root("codex-answer-pending");
+    let bin_dir = root.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let codex = bin_dir.join("codex");
+    fake_codex_appserver(&codex);
+
+    let common = [
+        "--cd",
+        root.to_str().unwrap(),
+        "--codex-bin",
+        codex.to_str().unwrap(),
+        "--json",
+    ];
+    let output = Command::new(bin())
+        .env("FAKE_REQUEST_USER_INPUT", "1")
+        .args([
+            "codex",
+            "exec",
+            "--session",
+            "needs-input",
+            "--task",
+            "ask then continue",
+        ])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exec: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(exec["state"], "waiting_for_user");
+    assert_eq!(
+        exec["pending_user_input"]["questions"][0]["question"],
+        "How should this continue?"
+    );
 
     let output = Command::new(bin())
         .args([
             "codex",
             "answer",
             "--session",
-            "latest",
+            "needs-input",
             "--choice",
-            "1",
+            "2",
             "--wait",
         ])
         .args(common)
@@ -1053,27 +1436,113 @@ fn codex_runtime_exec_resume_observe_and_stop_with_fake_codexctl() {
         String::from_utf8_lossy(&output.stderr)
     );
     let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(answer["action"], "answer");
-    assert_eq!(answer["summary"]["last_agent_message"], "answered");
+    assert_eq!(answer["ok"], true);
+    assert_eq!(answer["state"], "completed");
+    let message = answer["summary"]["last_agent_message"].as_str().unwrap();
+    assert!(message.ends_with("stop here"), "{message}");
 
-    for args in [
-        vec!["codex", "interrupt", "--session", "latest"],
-        vec!["codex", "stop", "--session", "latest"],
-        vec!["codex", "list"],
-        vec!["codex", "models"],
-        vec!["codex", "doctor"],
-    ] {
-        let output = Command::new(bin())
-            .args(args)
-            .args(common)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let record =
+        fs::read_to_string(root.join(".pandacode/sessions/codex/needs-input.json")).unwrap();
+    let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+    assert!(record["artifacts"]["pending_questions"].is_null());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wait_fast_fails_on_unknown_session() {
+    let root = temp_root("wait-fastfail");
+    let output = Command::new(bin())
+        .args([
+            "wait",
+            "--session",
+            "never-launched",
+            "--timeout-ms",
+            "60000",
+            "--interval-ms",
+            "500",
+            "--cd",
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "unknown session must fail");
+    let wait: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(wait["state"], "missing_session");
+    assert_eq!(wait["missing_sessions"][0], "never-launched");
+    // Must fail fast (grace window ~10s), not wait the full 60s timeout.
+    assert!((wait["elapsed_ms"].as_u64().unwrap()) < 30_000);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn wait_flags_missing_reports_and_claude_detach_runs_in_background() {
+    let root = temp_root("wait-no-report");
+    let bin_dir = root.join("bin");
+    let state = root.join("tmux-state");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    let tmux = bin_dir.join("tmux");
+    let claude = bin_dir.join("claude");
+    fake_tmux(&tmux, &state);
+    fake_claude(&claude);
+    let common = [
+        "--cd",
+        root.to_str().unwrap(),
+        "--tmux-bin",
+        tmux.to_str().unwrap(),
+        "--claude-bin",
+        claude.to_str().unwrap(),
+    ];
+
+    let output = Command::new(bin())
+        .args([
+            "claude",
+            "exec",
+            "--detach",
+            "--session",
+            "lane1",
+            "--task",
+            "review and write a report",
+            "--expect-artifact",
+            "result/lane1.md",
+        ])
+        .args(common)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exec: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(exec["detached"], true);
+    assert_eq!(exec["state"], "running");
+
+    let output = Command::new(bin())
+        .args([
+            "wait",
+            "--session",
+            "lane1",
+            "--expect-artifact",
+            "result/lane1.md",
+            "--timeout-ms",
+            "30000",
+            "--interval-ms",
+            "300",
+            "--cd",
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "wait should fail when the report is missing"
+    );
+    let wait: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(wait["ok"], false);
+    assert_eq!(wait["sessions"]["lane1"]["state"], "no_report");
+    assert_eq!(wait["missing_artifacts"][0], "result/lane1.md");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1122,7 +1591,10 @@ fn claude_runtime_exec_resume_observe_and_stop_with_fake_tmux() {
     assert!(output.status.success());
     let status: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(status.get("capture").is_none());
-    assert_eq!(status["state"], "stopped");
+    // Top-level state mirrors the recorded outcome (matches codex + wait);
+    // the dead tmux session shows up under live_state.
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["live_state"], "stopped");
 
     for args in [
         vec!["claude", "status", "--session", "main"],

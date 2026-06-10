@@ -74,7 +74,7 @@ Top-level commands expose common controls only:
 - JSON output
 
 With `--runtime auto`, known model ids can select a backend. Domestic model ids
-select Bamboo and infer their provider, Claude aliases such as `opus` select
+select Bamboo and infer their provider, Claude aliases such as `fable` or `opus` select
 Claude, and `gpt-*` ids select Codex.
 
 Permission defaults to `max`. Use `--permission limited` when the caller wants a

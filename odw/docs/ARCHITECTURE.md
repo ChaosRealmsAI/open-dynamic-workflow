@@ -83,7 +83,7 @@ Open Dynamic Workflow maps the requested workflow controls as follows:
 | dynamic task fan-out | `fanout(items, mapper)` maps structured upstream output into downstream workflow nodes |
 | pipeline phases | `pipeline(items, ...stages)` plus normal script variables in starter workflows |
 | live logs | `odw exec` streams workflow/phase/node/checkpoint events and writes `.odw/runs/<run_id>/events.jsonl` |
-| local run journal | `odw runs list` / `odw runs show latest` |
+| local run journal | `odw runs list` (or `--json`) / `odw runs show latest` |
 | direct-run resume | `odw exec --resume <run_id|latest>` skips completed stable node ids |
 | stop | stop the invoking process |
 | save script | workflow scripts are normal files |

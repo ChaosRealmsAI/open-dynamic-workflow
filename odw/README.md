@@ -260,7 +260,7 @@ agent(...))`.
   bamboo are unreliable at structured output). If `schema` is omitted, ODW applies
   no default schema.
 - `error feedback`: `.odw/schemas/error-feedback.schema.json` is the standard
-  result when a worker, command, schema, or CodexCTL step fails.
+  result when a worker, command, schema, or Codex step fails.
 
 `odw-orchestrator` plans and routes. The workflow script owns executable
 branching, fan-out, loops, intermediate state, and final aggregation.

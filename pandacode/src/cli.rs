@@ -556,10 +556,6 @@ pub struct BambooRunArgs {
 
 #[derive(Debug, Args, Clone)]
 pub struct RuntimeBins {
-    /// Deprecated and ignored: the Codex runtime now drives `codex app-server`
-    /// directly. Kept so existing callers passing --codexctl-bin do not break.
-    #[arg(long, hide = true, default_value = "codexctl")]
-    pub codexctl_bin: String,
     #[arg(long, hide = true, default_value = "codex")]
     pub codex_bin: String,
     #[arg(long, hide = true, default_value = "claude")]
@@ -587,7 +583,6 @@ pub struct RuntimeBins {
 impl Default for RuntimeBins {
     fn default() -> Self {
         Self {
-            codexctl_bin: "codexctl".to_string(),
             codex_bin: "codex".to_string(),
             claude_bin: "claude".to_string(),
             tmux_bin: "tmux".to_string(),

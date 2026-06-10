@@ -678,7 +678,7 @@ const out = await agent("mock codex result", {
       adapter:{
         type:"object",
         required:["backend"],
-        properties:{backend:{enum:["codexctl","pandacode"]},runtime:{type:"string"}}
+        properties:{backend:{enum:["codex","claude","pandacode"]},runtime:{type:"string"}}
       },
       error:{type:["object","null"]}
     }
@@ -1004,7 +1004,7 @@ if (s === "review_workspace_probe") {
 const R = {
   exit1_oktrue: ['{"ok":true,"state":"completed","summary":{"ok":true},"last_agent_message":"all good"}', 1],
   exit1_nook:   ['{"state":"completed","summary":{},"last_agent_message":"done-ish"}', 1],
-  okfalse:      ['{"ok":false,"state":"failed","error":{"category":"codexctl_rate_limit","message":"rate limited"}}', 0],
+  okfalse:      ['{"ok":false,"state":"failed","error":{"category":"codex_rate_limit","message":"rate limited"}}', 0],
   bamboo_reply: ['{"ok":true,"state":"completed","runtime":"bamboo","summary":{"status":"completed","summary":"BAMBOO-REPLY-TEXT"}}', 0],
 };
 const [out, code] = R[s] || R.exit1_oktrue;
@@ -1027,7 +1027,7 @@ test("pandacode: non-zero exit with ok:true/absent report is surfaced as failure
 test("pandacode: structured ok:false report preserves error category + fails", () => {
   const r = run(FAILWF, { backend: "pandacode", pandacodeBin: fakePanda, env: { FAKE_PANDA: "okfalse" } });
   assert(r.code !== 0, `ok:false must fail: ${r.out.slice(-200)}`);
-  assert(/"category":"codexctl_rate_limit"/.test(r.out), `error category lost: ${r.out.slice(-200)}`);
+  assert(/"category":"codex_rate_limit"/.test(r.out), `error category lost: ${r.out.slice(-200)}`);
 });
 
 test("pandacode: JSONL stdout selects final report instead of earlier events", () => {

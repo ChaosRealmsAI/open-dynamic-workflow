@@ -12,7 +12,6 @@ const runDir = process.env.ODW_RUN_DIR || cwd;
 const statePath = process.env.ODW_STATE_PATH || "";
 const resumeStatePath = process.env.ODW_RESUME_STATE_PATH || "";
 const resumeFrom = process.env.ODW_RESUME_FROM || "";
-const codexctlBin = process.env.ODW_CODEXCTL_BIN || "codexctl";
 const pandacodeBin = process.env.ODW_PANDACODE_BIN || "pandacode";
 const runId = process.env.ODW_RUN_ID || basename(runDir);
 const provider = process.env.ODW_PROVIDER || "";
@@ -2436,9 +2435,6 @@ async function autoAnswerNeedsInput(result, runtime, fallbackSession, execCwd, t
     if (timeoutMs) {
       answerArgs.push("--timeout-ms", String(timeoutMs));
     }
-    if (runtime === "codex") {
-      answerArgs.push("--codexctl-bin", codexctlBin);
-    }
     result = await runPandaCodeCommand(runtime, "answer", answerArgs, execCwd, {
       session,
       label: `${session || fallbackSession || "agent"}-answer-${round}`
@@ -2518,10 +2514,9 @@ async function runPandaCode(prompt, options) {
     args.push("--timeout-ms", String(timeoutMs));
   }
   if (runtime === "codex") {
-    args.push("--codexctl-bin", codexctlBin);
     // Default to full access because a coding node usually must install
     // dependencies (npm/pip/cargo) and reach the network, and the only narrower
-    // mode codexctl exposes — workspace-write — also BLOCKS network, which breaks
+    // mode codex exposes — workspace-write — also BLOCKS network, which breaks
     // real builds (verified: `npm install` fails with connect EPERM under it).
     // Authors can opt a node down with { permission: "limited" } to confine it to
     // the working dir with no network (good for reviewing/analysing code).

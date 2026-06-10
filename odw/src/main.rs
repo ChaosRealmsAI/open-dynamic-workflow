@@ -45,8 +45,6 @@ enum Commands {
         path: PathBuf,
         #[arg(long, default_value = "claude")]
         claude_bin: String,
-        #[arg(long, default_value = "codexctl")]
-        codexctl_bin: String,
         #[arg(long, env = "ODW_PANDACODE_BIN", default_value = "pandacode")]
         pandacode_bin: String,
         #[arg(long, help = "Print the full machine-readable doctor report")]
@@ -103,8 +101,6 @@ struct ExecArgs {
     /// floor this at 600s so real coding isn't truncated.
     #[arg(long, default_value = "120")]
     timeout: String,
-    #[arg(long, env = "ODW_CODEXCTL_BIN", default_value = "codexctl")]
-    codexctl_bin: String,
     #[arg(long, env = "ODW_PANDACODE_BIN", default_value = "pandacode")]
     pandacode_bin: String,
     #[arg(long, help = "Print only the final workflow result as one JSON object")]
@@ -149,10 +145,9 @@ fn main() -> Result<()> {
         Commands::Doctor {
             path,
             claude_bin,
-            codexctl_bin,
             pandacode_bin,
             json,
-        } => doctor(&path, &claude_bin, &codexctl_bin, &pandacode_bin, json),
+        } => doctor(&path, &claude_bin, &pandacode_bin, json),
         Commands::Contract => {
             println!("{}", contract_text());
             Ok(())
@@ -182,12 +177,11 @@ fn main() -> Result<()> {
 fn doctor(
     root: &Path,
     claude_bin: &str,
-    codexctl_bin: &str,
     pandacode_bin: &str,
     json_output: bool,
 ) -> Result<()> {
     let pandacode_bin = &resolved_pandacode_bin(pandacode_bin);
-    let report = doctor_report(root, claude_bin, codexctl_bin, pandacode_bin)?;
+    let report = doctor_report(root, claude_bin, pandacode_bin)?;
     let ok = report
         .get("ok")
         .and_then(|value| value.as_bool())
@@ -239,11 +233,10 @@ fn starter(args: StarterArgs) -> Result<()> {
 fn doctor_report(
     root: &Path,
     claude_bin: &str,
-    codexctl_bin: &str,
     pandacode_bin: &str,
 ) -> Result<serde_json::Value> {
     let root = normalize_root(root)?;
-    // `pandacode` is the one executor odw actually requires. claude/codexctl are
+    // `pandacode` is the one executor odw actually requires. claude/codex are
     // PandaCode's concern (it owns the runtimes + their mechanics), so they are
     // reported for information but do not gate odw's own health.
     // odw's script runtime runs on node; without it no workflow can execute, so
@@ -251,10 +244,13 @@ fn doctor_report(
     let node = run_version("node", &["--version"]);
     let pandacode = run_version(pandacode_bin, &["--version"]);
     let claude = run_version(claude_bin, &["--version"]);
-    let codexctl = run_version(codexctl_bin, &["--help"]);
-    let codex = run_codex_status(codexctl_bin);
     let bamboo_keys = bamboo_key_report();
     let runtimes = run_pandacode_doctor_report(pandacode_bin, &root);
+    // codex health comes from pandacode's own codex app-server doctor.
+    let codex = runtimes
+        .get("codex")
+        .cloned()
+        .unwrap_or_else(|| json!({ "ok": false, "summary": "pandacode codex doctor unavailable" }));
     Ok(json!({
         "ok": node.ok && pandacode.ok,
         "odw_version": ODW_VERSION,
@@ -263,7 +259,6 @@ fn doctor_report(
         "pandacode": pandacode,
         "runtimes": runtimes,
         "claude": claude,
-        "codexctl": codexctl,
         "codex": codex,
         "bamboo_keys": bamboo_keys,
         "decision": "odw is zero-install: no project files to scaffold. It dispatches each node to `pandacode <runtime> exec`, so it requires only Node.js + the pandacode binary. PandaCode owns the codex/claude/bamboo runtimes."
@@ -325,16 +320,11 @@ fn render_doctor_human(report: &serde_json::Value) -> String {
         "{} codex: {}",
         icon(codex_ok),
         if codex_ok {
-            "logged in / quota check passed".to_string()
-        } else if value_ok(&report["codexctl"]) {
-            format!(
-                "codexctl exists, but login/quota check failed ({}) - run `codexctl status`, sign in, or refresh quota",
-                value_summary(&report["codex"])
-            )
+            "available via pandacode (codex app-server)".to_string()
         } else {
             format!(
-                "codexctl not runnable ({}) - install codexctl or set --codexctl-bin",
-                value_summary(&report["codexctl"])
+                "not ready ({}) - check `pandacode codex doctor` (codex login/quota)",
+                value_summary(&report["codex"])
             )
         }
     ));
@@ -435,60 +425,6 @@ fn bamboo_ready_count(value: &serde_json::Value) -> usize {
         return 0;
     };
     map.values().filter(|item| value_ok(item)).count()
-}
-
-fn run_codex_status(codexctl_bin: &str) -> serde_json::Value {
-    let checks: &[&[&str]] = &[&["status"], &["account"], &["quota"]];
-    let mut failures = Vec::new();
-    for args in checks {
-        let status = run_command_status(codexctl_bin, args);
-        if status.ok {
-            return json!({
-                "ok": true,
-                "command": command_display(codexctl_bin, args),
-                "summary": status.summary
-            });
-        }
-        failures.push(format!(
-            "{}: {}",
-            command_display(codexctl_bin, args),
-            status.summary
-        ));
-    }
-    json!({
-        "ok": false,
-        "command": codexctl_bin,
-        "summary": failures.join("; ")
-    })
-}
-
-fn run_command_status(command: &str, args: &[&str]) -> ToolStatus {
-    match Command::new(command).args(args).output() {
-        Ok(output) => {
-            let text = if output.stdout.is_empty() {
-                String::from_utf8_lossy(&output.stderr).to_string()
-            } else {
-                String::from_utf8_lossy(&output.stdout).to_string()
-            };
-            ToolStatus {
-                ok: output.status.success(),
-                command: command_display(command, args),
-                summary: text.lines().next().unwrap_or("").to_string(),
-            }
-        }
-        Err(error) => ToolStatus {
-            ok: false,
-            command: command_display(command, args),
-            summary: error.to_string(),
-        },
-    }
-}
-
-fn command_display(command: &str, args: &[&str]) -> String {
-    std::iter::once(command)
-        .chain(args.iter().copied())
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 const BAMBOO_PROVIDERS: &[(&str, &str)] = &[
@@ -1338,7 +1274,6 @@ fn exec_script(args: ExecArgs) -> Result<()> {
             resume_state_path,
             backend: args.backend,
             odw_bin: current_exe,
-            codexctl_bin: args.codexctl_bin,
             pandacode_bin: resolved_pandacode_bin(&args.pandacode_bin),
             provider: args.provider,
             model: args.model,
@@ -1529,7 +1464,6 @@ struct ScriptRunConfig {
     resume_state_path: Option<PathBuf>,
     backend: String,
     odw_bin: String,
-    codexctl_bin: String,
     pandacode_bin: String,
     provider: Option<String>,
     model: Option<String>,
@@ -1614,7 +1548,6 @@ fn run_observable_script(root: &Path, command: Vec<String>, config: ScriptRunCon
             config.resume_from.as_deref().unwrap_or_default(),
         )
         .env("ODW_BIN", &config.odw_bin)
-        .env("ODW_CODEXCTL_BIN", &config.codexctl_bin)
         .env("ODW_PANDACODE_BIN", &config.pandacode_bin)
         .env("ODW_PROVIDER", config.provider.as_deref().unwrap_or(""))
         .env("ODW_MODEL", config.model.as_deref().unwrap_or(""))
@@ -2984,7 +2917,6 @@ return result;
             model: None,
             effort: "low".to_string(),
             timeout: "120".to_string(),
-            codexctl_bin: "codexctl".to_string(),
             pandacode_bin: "pandacode".to_string(),
             json: false,
             dry_run: false,
@@ -3049,7 +2981,6 @@ return { ok: true };
             model: None,
             effort: "low".to_string(),
             timeout: "120".to_string(),
-            codexctl_bin: "codexctl".to_string(),
             pandacode_bin: "pandacode".to_string(),
             json: false,
             dry_run: false,

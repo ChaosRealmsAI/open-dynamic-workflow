@@ -256,14 +256,14 @@ export interface WorkflowBudget {
 }
 
 export type OdwErrorCategory =
-  | "codexctl_not_found"
-  | "codexctl_auth"
-  | "codexctl_rate_limit"
-  | "codexctl_network"
-  | "codexctl_permission"
-  | "codexctl_model"
-  | "codexctl_input"
-  | "codexctl_failed"
+  | "codex_not_found"
+  | "codex_auth"
+  | "codex_rate_limit"
+  | "codex_network"
+  | "codex_permission"
+  | "codex_model"
+  | "codex_input"
+  | "codex_failed"
   | "workflow_agent_failed"
   | "schema_mismatch"
   | "verification_failed"
@@ -274,7 +274,7 @@ export interface OdwErrorFeedback {
   origin: {
     phase: string;
     agent: string;
-    backend?: "codexctl" | "claude-code" | "shell" | string;
+    backend?: "codex" | "claude-code" | "shell" | string;
     attempt?: number;
   };
   error: {

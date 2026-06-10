@@ -1447,7 +1447,6 @@ mod tests {
 
     fn bins() -> RuntimeBins {
         RuntimeBins {
-            codexctl_bin: "codexctl".to_string(),
             codex_bin: "codex".to_string(),
             claude_bin: "claude".to_string(),
             tmux_bin: "tmux".to_string(),

@@ -2,8 +2,7 @@
 //!
 //! Each turn spawns one app-server process, starts or resumes a thread, runs
 //! `turn/start`, and waits for `turn/completed`. Thread state persists as
-//! Codex rollout files, so resume works across processes without a daemon or
-//! an external `codexctl` binary.
+//! Codex rollout files, so resume works across processes without a daemon.
 //!
 //! `--detach` re-execs pandacode as a background worker that owns the live
 //! app-server for the whole turn. The worker keeps the session record fresh

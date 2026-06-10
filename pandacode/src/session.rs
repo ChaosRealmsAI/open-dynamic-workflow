@@ -228,7 +228,7 @@ mod tests {
     fn saves_and_resolves_latest() {
         let root = std::env::temp_dir().join(format!("pandacode-session-test-{}", now_millis()));
         fs::create_dir_all(&root).unwrap();
-        let mut record = SessionRecord::new("codex", "s1", "codexctl", &root);
+        let mut record = SessionRecord::new("codex", "s1", "codex-appserver", &root);
         save(&root, &mut record).unwrap();
         assert_eq!(resolve_session(&root, "codex", "latest").unwrap(), "s1");
         assert_eq!(load(&root, "codex", "latest").unwrap().session, "s1");
